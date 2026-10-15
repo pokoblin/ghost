@@ -186,7 +186,7 @@ protected:
 	// tests/vaapi_import_test.cpp to check what the VPP reads from an import.
 
 	// Imports `frame` as a short-lived RGB VA surface (VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2).
-	VASurfaceID import_rgb_surface(const DmabufFrame &frame);
+	VASurfaceID import_rgb_surface(const DmabufFrame &frame) const;
 
 	// VPP-converts `rgb_surface` into the next surface from nv12_surfaces_
 	// and returns it. Blocks (vaSyncSurface) until the conversion completes,
@@ -200,6 +200,13 @@ private:
 		int64_t pts_us;
 		bool keyframe;
 	};
+
+	// Whether the driver misreads an imported linear surface whose pitch
+	// isn't a multiple of 64 (can_import()): probed on first use, then
+	// kept.
+	bool pitch_misread() const;
+	bool probe_pitch_misread() const;
+	mutable int pitch_misread_ = -1; // -1: not asked yet
 
 	bool init_display();
 	bool init_encode_pipeline();

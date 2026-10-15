@@ -9,13 +9,16 @@
 #include <va/va_drmcommon.h>
 #include <va/va_vpp.h>
 
+#include <gbm.h>
 #include <libdrm/drm_fourcc.h>
+#include <xf86drm.h>
 
 #include <algorithm>
 #include <cstring>
 
 #include <iterator>
 
+#include <fcntl.h>
 #include <sys/timerfd.h>
 #include <unistd.h>
 
@@ -265,24 +268,139 @@ std::vector<uint64_t> VaapiEncoderBase::supported_import_modifiers(uint32_t drm_
 	return {DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID};
 }
 
-// iHD (26.1, ADL-N) reads an imported RGB surface at its pitch rounded up
-// to 64 bytes, without failing the import, once the surface is 128 rows
-// or more (every GDP output is): a linear XRGB8888 buffer whose rows are
-// width * 4 bytes (mutter's at any width that isn't a multiple of 16)
-// comes out sheared by 32 bytes a row, and its last rows are read past
-// the end of the buffer. Tiled layouts' pitches are whole tiles, and
-// radeonsi's linear pitches are 256-byte aligned, so neither is turned
-// down.
+// iHD (26.1.2 and 26.4.1 at least, ADL-N) reads an imported RGB surface
+// at its pitch rounded up to 64 bytes, without failing the import, once
+// the surface is 128 rows or more (every GDP output is): a linear
+// XRGB8888 buffer whose rows are width * 4 bytes (mutter's at any width
+// that isn't a multiple of 16) comes out sheared by 32 bytes a row, and
+// its last rows are read past the end of the buffer. Whether this driver
+// does is asked once, the first time such a pitch turns up
+// (pitch_misread()). Tiled layouts' pitches are whole tiles, and
+// radeonsi's linear pitches are 256-byte aligned, so neither ever asks.
 bool VaapiEncoderBase::can_import(const DmabufFrame &frame) const {
 	for (int i = 0; i < frame.n_planes; i++) {
 		if (frame.stride[i] % 64 != 0) {
-			return false;
+			return !pitch_misread();
 		}
 	}
 	return true;
 }
 
-VASurfaceID VaapiEncoderBase::import_rgb_surface(const DmabufFrame &frame) {
+bool VaapiEncoderBase::pitch_misread() const {
+	if (pitch_misread_ < 0) {
+		pitch_misread_ = probe_pitch_misread() ? 1 : 0;
+		WLOG_INFO("vaapi_encoder: the driver reads a linear import whose pitch isn't a multiple of 64 %s",
+			pitch_misread_ ? "wrongly; such frames are read back" : "correctly; such frames are imported");
+	}
+	return pitch_misread_ == 1;
+}
+
+// A 136x128 frame (SFC's smallest is 128x128) in a 544-byte pitch, black
+// with a white column at x = 64, converted as push() converts: read at a
+// pitch rounded up to 64, the column moves 8 px left a row. Anything that
+// keeps the answer from being known counts as a misread, which only costs
+// a read-back.
+bool VaapiEncoderBase::probe_pitch_misread() const {
+	constexpr uint32_t kWidth = 136, kHeight = 128, kPitch = kWidth * 4, kColumn = 64;
+	bool misread = true;
+	int fd = -1;
+	gbm_device *gbm = nullptr;
+	gbm_bo *bo = nullptr;
+	VASurfaceID rgb = VA_INVALID_ID, nv12 = VA_INVALID_ID;
+	VAImage image = {};
+	image.image_id = VA_INVALID_ID;
+	// A DRM file of its own for GBM, as DmabufReader::open() says why:
+	// iHD and the GL driver behind GBM keep separate GEM handle tables.
+	char *node = drmGetRenderDeviceNameFromFd(config_.drm_fd);
+	if (node) {
+		fd = ::open(node, O_RDWR | O_CLOEXEC);
+		free(node);
+	}
+	gbm = fd >= 0 ? gbm_create_device(fd) : nullptr;
+	// Wide enough that kPitch * kHeight fits whatever pitch GBM picks.
+	bo = gbm ? gbm_bo_create(gbm, kPitch / 4 + 64, kHeight, GBM_FORMAT_XRGB8888, GBM_BO_USE_LINEAR) : nullptr;
+	uint32_t map_stride = 0;
+	void *map_data = nullptr;
+	auto *map = bo ? static_cast<uint8_t *>(gbm_bo_map(bo, 0, 0, gbm_bo_get_width(bo), kHeight,
+						 GBM_BO_TRANSFER_WRITE, &map_stride, &map_data))
+				   : nullptr;
+	DmabufFrame frame;
+	if (map) {
+		// The buffer as plain bytes: rows kPitch apart, whatever GBM's own.
+		memset(map, 0, (size_t)map_stride * kHeight);
+		for (uint32_t y = 0; y < kHeight; y++) {
+			memset(map + (size_t)y * kPitch + kColumn * 4, 0xff, 4 * 4);
+		}
+		gbm_bo_unmap(bo, map_data);
+		frame.width = (int32_t)kWidth;
+		frame.height = (int32_t)kHeight;
+		frame.format = DRM_FORMAT_XRGB8888;
+		frame.modifier = DRM_FORMAT_MOD_LINEAR;
+		frame.n_planes = 1;
+		frame.offset[0] = gbm_bo_get_offset(bo, 0);
+		frame.stride[0] = kPitch;
+		frame.fd[0] = gbm_bo_get_fd(bo);
+		rgb = frame.fd[0] >= 0 ? import_rgb_surface(frame) : VA_INVALID_ID;
+	}
+	if (rgb != VA_INVALID_ID &&
+		vaCreateSurfaces(display_, VA_RT_FORMAT_YUV420, kWidth, kHeight, &nv12, 1, nullptr, 0) ==
+			VA_STATUS_SUCCESS) {
+		VARectangle rect = {0, 0, (uint16_t)kWidth, (uint16_t)kHeight};
+		VAProcPipelineParameterBuffer pipeline = {};
+		pipeline.surface = rgb;
+		pipeline.surface_region = &rect;
+		pipeline.output_region = &rect;
+		VABufferID buf = VA_INVALID_ID;
+		bool ok = vaCreateBuffer(display_, vpp_context_, VAProcPipelineParameterBufferType, sizeof(pipeline),
+					  1, &pipeline, &buf) == VA_STATUS_SUCCESS &&
+			vaBeginPicture(display_, vpp_context_, nv12) == VA_STATUS_SUCCESS &&
+			vaRenderPicture(display_, vpp_context_, &buf, 1) == VA_STATUS_SUCCESS &&
+			vaEndPicture(display_, vpp_context_) == VA_STATUS_SUCCESS &&
+			vaSyncSurface(display_, nv12) == VA_STATUS_SUCCESS;
+		if (buf != VA_INVALID_ID) {
+			vaDestroyBuffer(display_, buf);
+		}
+		VAImageFormat format = {};
+		format.fourcc = VA_FOURCC_NV12;
+		format.byte_order = VA_LSB_FIRST;
+		format.bits_per_pixel = 12;
+		uint8_t *pixels = nullptr;
+		if (ok && vaCreateImage(display_, &format, kWidth, kHeight, &image) == VA_STATUS_SUCCESS &&
+			vaGetImage(display_, nv12, 0, 0, kWidth, kHeight, image.image_id) == VA_STATUS_SUCCESS &&
+			vaMapBuffer(display_, image.buf, (void **)&pixels) == VA_STATUS_SUCCESS) {
+			misread = false;
+			for (uint32_t y = 0; y < kHeight; y++) {
+				const uint8_t *row = pixels + image.offsets[0] + (size_t)y * image.pitches[0];
+				misread |= row[kColumn + 1] < 128 || row[kColumn - 8] >= 128;
+			}
+			vaUnmapBuffer(display_, image.buf);
+		}
+	}
+	if (image.image_id != VA_INVALID_ID) {
+		vaDestroyImage(display_, image.image_id);
+	}
+	if (nv12 != VA_INVALID_ID) {
+		vaDestroySurfaces(display_, &nv12, 1);
+	}
+	if (rgb != VA_INVALID_ID) {
+		vaDestroySurfaces(display_, &rgb, 1);
+	}
+	if (frame.fd[0] > 0) {
+		::close(frame.fd[0]);
+	}
+	if (bo) {
+		gbm_bo_destroy(bo);
+	}
+	if (gbm) {
+		gbm_device_destroy(gbm);
+	}
+	if (fd >= 0) {
+		::close(fd);
+	}
+	return misread;
+}
+
+VASurfaceID VaapiEncoderBase::import_rgb_surface(const DmabufFrame &frame) const {
 	// Assumes a single DRM object backs every plane (true of the buffers
 	// the screencast sources deliver: one linear/tiled GBM buffer, one fd). A frame with
 	// planes spread across multiple dmabuf fds would need num_objects > 1.

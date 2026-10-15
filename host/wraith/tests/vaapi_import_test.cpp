@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 // VaapiEncoderBase's dmabuf path (encode/vaapi/vaapi_encoder_base.cpp:
-// import, then the VPP's RGB -> NV12) against the pixels in the buffer:
-// for every linear XRGB8888 frame that can_import() accepts, the NV12
-// surface's luma must be the buffer's, at widths whose rows are and aren't
-// a multiple of 64 bytes. iHD's VPP reads a 3296-byte pitch (824 px) as
-// 3328, which sheared the picture of every session at such a width. It
-// does so only on surfaces 128 rows or taller, so the frames here are as
-// tall as the smallest output gdp-spec.md §7.2 allows.
+// import, then the VPP's RGB -> NV12) against the pixels in the buffer,
+// for linear XRGB8888 frames at widths whose rows are and aren't a
+// multiple of 64 bytes: can_import() must accept exactly the frames whose
+// NV12 luma comes out as the buffer's. iHD's VPP reads a 3296-byte pitch
+// (824 px) as 3328, which sheared the picture of every session at such a
+// width; a driver that reads it right must not be sent down the read-back
+// path for nothing. iHD misreads only on surfaces 128 rows or taller, so
+// the frames here are as tall as the smallest output gdp-spec.md §7.2
+// allows.
 //
 // Needs a render node with a VA-API H.264 encoder (WRAITH_TEST_RENDER_NODE,
 // default /dev/dri/renderD128); without one it skips (exit 77).
@@ -97,8 +99,9 @@ void check_width(gbm_device *gbm, int fd, uint32_t w, uint32_t alloc_w, uint32_t
 		g_failures++;
 		return;
 	}
+	// Spare rows, so that a driver reading at a wider pitch stays inside it.
 	gbm_bo *bo =
-		gbm_bo_create(gbm, alloc_w, h, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+		gbm_bo_create(gbm, alloc_w, h + 16, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
 	if (!bo) {
 		fprintf(stderr, "%u (in %u) x %u: can't make a linear dmabuf\n", w, alloc_w, h);
 		g_failures++;
@@ -126,7 +129,7 @@ void check_width(gbm_device *gbm, int fd, uint32_t w, uint32_t alloc_w, uint32_t
 	f.offset[0] = gbm_bo_get_offset(bo, 0);
 	f.stride[0] = gbm_bo_get_stride(bo);
 
-	if (map && probe.can_import(f)) {
+	if (map) {
 		std::vector<uint8_t> got = probe.luma(f);
 		CHECK(!got.empty());
 		// Rounding differs between drivers by a step or two; a misread
@@ -135,11 +138,13 @@ void check_width(gbm_device *gbm, int fd, uint32_t w, uint32_t alloc_w, uint32_t
 		for (size_t i = 0; i < got.size(); i++) {
 			differ += abs(got[i] - expected_luma(&pixels[i * 4])) > 3;
 		}
-		if (differ) {
-			fprintf(stderr, "%ux%u, %u-byte pitch: %zu of %zu luma samples differ from the buffer's\n", w, h,
-				f.stride[0], differ, got.size());
+		bool read_right = !got.empty() && differ == 0;
+		bool accepted = probe.can_import(f);
+		if (accepted != read_right) {
+			fprintf(stderr, "%ux%u, %u-byte pitch: can_import() is %s, %zu of %zu luma samples wrong\n", w, h,
+				f.stride[0], accepted ? "true" : "false", differ, got.size());
 		}
-		CHECK(differ == 0);
+		CHECK(accepted == read_right);
 	}
 	close(f.fd[0]);
 	gbm_bo_destroy(bo);
