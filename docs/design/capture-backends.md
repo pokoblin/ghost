@@ -118,6 +118,9 @@ and makes the calls in the order mutter requires:
 - mutter runs headless by itself when the user's logind session has no
   seat, which a ghost session never has, so the stock
   `org.gnome.Shell@.service` is used unchanged.
+- Each `RecordVirtual` monitor is new to mutter, so the scale set in
+  Settings doesn't carry over to the next one; wraith re-applies it
+  ([Display scale](#display-scale)).
 
 ### KDE Plasma
 
@@ -213,6 +216,44 @@ does the same, reopens the encoder at the new size, and answers with
 about 10 ms; the desktop sees a mode change. A compositor that can't
 resize keeps its size, the request is declined, and `SessionAccept`
 reports the real size. Nothing relaunches the leader to change size.
+
+## Display scale
+
+mutter saves the scale set in Settings to `~/.config/monitors.xml`, keyed
+by the monitor's connector, vendor, product and serial, and uses a saved
+configuration only if its mode exists too. A `RecordVirtual` monitor is
+always `Meta-0`, `MetaVendor`, `Virtual remote monitor`, its serial goes
+up by one with each monitor a gnome-shell makes (from `0x000001` after
+every login), and its mode is the size the client asked for. Every login
+and every resize therefore makes a monitor that almost never matches, and
+it starts at scale 1.0.
+
+The GNOME backend remembers the scale itself (`GnomeDisplayScale`,
+`display_scale.hpp`):
+
+- Before `Start()` it subscribes to `DisplayConfig.MonitorsChanged` and
+  notes the virtual monitors already there. The session's monitor is
+  made only once the stream is consumed, about 100 ms after `Start()`,
+  and not at all while capture is paused, so every `MonitorsChanged` is
+  checked with `GetCurrentState`.
+- The first state that shows a new virtual monitor gets the remembered
+  scale through `ApplyMonitorsConfig` method 1 (temporary), which writes
+  nothing to `monitors.xml`. The scale applied is the closest one the
+  mode supports, the smaller of two equally close: mutter offers only
+  scales that give a whole logical size, so a 2864x1606 monitor takes 1
+  and 2 but not 4/3. The rounded scale is not remembered.
+- A scale change on that monitor after that is the user's (Settings
+  applies it, mutter emits `MonitorsChanged`). It is written to
+  `$XDG_STATE_HOME/wraith/gnome-scale` (default
+  `~/.local/state/wraith/`). Settings still saves its own persistent
+  configuration to `monitors.xml`, as it does on any desktop.
+- Failures are only logged; the session runs at whatever scale mutter
+  chose.
+
+The remembered scale is a single number per user. It doesn't depend on
+whether the client asks for its size in pixels or in points (spectre's
+Retina setting), so 200% chosen at a pixel-sized output makes a
+point-sized one, half as many pixels, very crowded.
 
 ## Limitations
 
