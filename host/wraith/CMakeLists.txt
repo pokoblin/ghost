@@ -184,6 +184,7 @@ add_executable(wraith
   src/screencast/frame_hold.cpp
   src/screencast/gnome_remote_session.cpp
   src/screencast/display_scale.cpp
+  src/screencast/gnome_display_scale.cpp
   src/screencast/wayland_client.cpp
   src/screencast/kwin_remote_session.cpp
   src/screencast/kwin_output_size.cpp
