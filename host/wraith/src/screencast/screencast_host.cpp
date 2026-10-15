@@ -484,7 +484,15 @@ void ScreencastHost::deliver_dmabuf(const DmabufFrame &frame, void *token, int64
 		WLOG_ERROR("screencast: GPU tile hashing failed; reading frames back for refinement instead");
 		drop_tile_source();
 	}
-	if (session_->wants_tiled_dmabuf() && ensure_reader() && tile_source_) {
+	// A frame the encoder can't import (its row pitch, say) is read back
+	// instead, as for an encoder that wants CPU pixels.
+	bool importable = session_->can_import(frame);
+	if (!importable && !unimportable_logged_) {
+		unimportable_logged_ = true;
+		WLOG_INFO("screencast: the encoder can't import a %dx%d dmabuf with a %u-byte pitch; reading it back",
+			frame.width, frame.height, frame.stride[0]);
+	}
+	if (importable && session_->wants_tiled_dmabuf() && ensure_reader() && tile_source_) {
 		// readback_ lags the frame being encoded from here on: a later
 		// read-back must read anew.
 		readback_current_ = false;
@@ -502,7 +510,7 @@ void ScreencastHost::deliver_dmabuf(const DmabufFrame &frame, void *token, int64
 		WLOG_ERROR("screencast: GPU tile hashing failed; reading frames back for refinement instead");
 		drop_tile_source();
 	}
-	if (!session_->wants_cpu_frame()) {
+	if (!session_->wants_cpu_frame() && (importable || !ensure_reader())) {
 		// readback_ now lags the frame being encoded: refinement resuming
 		// redelivers this frame (fresh = false), and must read it anew.
 		readback_current_ = false;
@@ -603,6 +611,7 @@ void ScreencastHost::close_capture() {
 	}
 	readback_current_ = false;
 	last_delivery_tiled_ = false;
+	unimportable_logged_ = false;
 	for (void *token : frame_hold_.drain()) {
 		if (frame_source_) {
 			frame_source_->release(token);

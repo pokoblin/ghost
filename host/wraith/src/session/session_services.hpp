@@ -143,6 +143,9 @@ public:
 	std::vector<uint64_t> supported_import_modifiers(uint32_t drm_format) const {
 		return encoder_ ? encoder_->supported_import_modifiers(drm_format) : std::vector<uint64_t>{};
 	}
+	// Encoder::can_import: false sends this frame down the read-back path
+	// even when the encoder would take dmabufs.
+	bool can_import(const DmabufFrame &frame) const { return !encoder_ || encoder_->can_import(frame); }
 	// Which backend the factory picked: "vaapi", "nvenc", "pyrowave",
 	// "software", "vaapi+refine", ... (SessionAccept.encoder, gdp-spec.md §6.5);
 	// empty while no encoder is open.

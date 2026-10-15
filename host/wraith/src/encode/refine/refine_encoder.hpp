@@ -71,6 +71,8 @@ public:
 	bool push_cpu(const uint8_t *data, uint32_t width, uint32_t height, uint32_t stride, int64_t pts_us,
 		const DamageRegion *damage) override;
 	bool takes_tiled_dmabuf() const override;
+	// push() and push_tiled() hand the frame to the base as it is.
+	bool can_import(const DmabufFrame &frame) const override { return base_->can_import(frame); }
 	bool push_tiled(const DmabufFrame &frame, TileSource &tiles, int64_t pts_us,
 		const DamageRegion *damage) override;
 	void request_keyframe() override;

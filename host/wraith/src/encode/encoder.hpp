@@ -159,6 +159,14 @@ public:
 		return {};
 	}
 
+	// False if push() (or push_tiled()) would misread this particular frame
+	// even though its modifier is supported; the caller then reads it back
+	// and sends it through push_cpu() instead. Asked per frame.
+	virtual bool can_import(const DmabufFrame &frame) const {
+		(void)frame;
+		return true;
+	}
+
 	virtual void request_keyframe() = 0;
 	// Loss repair, in two halves (GdpSession's StatsReport handling):
 	// frames_lost() names the packets, by pts_us, that the client reported
