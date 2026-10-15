@@ -50,6 +50,7 @@ public:
 	bool push_cpu(const uint8_t *data, uint32_t width, uint32_t height, uint32_t stride, int64_t pts_us,
 		const DamageRegion *damage) override;
 	std::vector<uint64_t> supported_import_modifiers(uint32_t drm_format) const override;
+	bool can_import(const DmabufFrame &frame) const override;
 	void request_keyframe() override;
 	void set_bitrate(uint32_t bitrate_bps) override;
 	std::vector<EncodedPacket> poll() override;
@@ -181,6 +182,18 @@ protected:
 	// The DPB surface the last encoded picture was reconstructed into.
 	VASurfaceID last_ref_surface_ = VA_INVALID_ID;
 
+	// These two are push()'s dmabuf path, protected for
+	// tests/vaapi_import_test.cpp to check what the VPP reads from an import.
+
+	// Imports `frame` as a short-lived RGB VA surface (VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2).
+	VASurfaceID import_rgb_surface(const DmabufFrame &frame);
+
+	// VPP-converts `rgb_surface` into the next surface from nv12_surfaces_
+	// and returns it. Blocks (vaSyncSurface) until the conversion completes,
+	// so it's safe for the caller to release/reuse `rgb_surface`'s backing
+	// dmabuf immediately after this returns.
+	VASurfaceID convert_to_nv12(VASurfaceID rgb_surface);
+
 private:
 	struct PendingFrame {
 		VABufferID coded_buf;
@@ -193,9 +206,6 @@ private:
 	bool init_vpp_pipeline();
 	void destroy_surface_pools();
 
-	// Imports `frame` as a short-lived RGB VA surface (VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2).
-	VASurfaceID import_rgb_surface(const DmabufFrame &frame);
-
 	// push_cpu()'s upload target: a driver-allocated RGB surface plus the
 	// VAImage used to write host pixels into it. Created on first use and
 	// kept for the life of the encoder (a per-frame create/destroy pair
@@ -203,12 +213,6 @@ private:
 	// on a dmabuf-only session.
 	bool ensure_cpu_upload_surface();
 	void destroy_cpu_upload_surface();
-
-	// VPP-converts `rgb_surface` into the next surface from nv12_surfaces_
-	// and returns it. Blocks (vaSyncSurface) until the conversion completes,
-	// so it's safe for the caller to release/reuse `rgb_surface`'s backing
-	// dmabuf immediately after this returns.
-	VASurfaceID convert_to_nv12(VASurfaceID rgb_surface);
 
 	EncodedPacket drain_coded_buffer(VABufferID coded_buf, bool keyframe, int64_t pts_us);
 

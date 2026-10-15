@@ -361,6 +361,19 @@ target_compile_options(wraith_gpu_tile_hash_test PRIVATE -Wall -Wextra -Wno-unus
 add_test(NAME wraith_gpu_tile_hash_test COMMAND wraith_gpu_tile_hash_test)
 set_tests_properties(wraith_gpu_tile_hash_test PROPERTIES SKIP_RETURN_CODE 77)
 
+# VA-API's dmabuf import against the buffer it imports, at row pitches that
+# are and aren't a multiple of 64 bytes. Needs a VA-API H.264 encoder;
+# skipped without one.
+add_executable(wraith_vaapi_import_test tests/vaapi_import_test.cpp src/encode/vaapi/vaapi_encoder_base.cpp
+  src/encode/vaapi/vaapi_h264_encoder.cpp src/encode/vaapi/h264_bitstream.cpp
+  src/encode/vaapi/nal_bitstream.cpp src/util/log.cpp)
+target_include_directories(wraith_vaapi_import_test PRIVATE src)
+target_link_libraries(wraith_vaapi_import_test PRIVATE gdp PkgConfig::LIBVA PkgConfig::LIBVA_DRM PkgConfig::GBM
+  PkgConfig::LIBDRM)
+target_compile_options(wraith_vaapi_import_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME wraith_vaapi_import_test COMMAND wraith_vaapi_import_test)
+set_tests_properties(wraith_vaapi_import_test PROPERTIES SKIP_RETURN_CODE 77)
+
 # PyroWave's dmabuf input against its CPU input: the same pixels must make
 # the same bitstream, linear and tiled. Needs a GPU; skipped without one.
 if(PYROWAVE_FOUND)

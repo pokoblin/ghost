@@ -145,7 +145,12 @@ whole-CTB groups the decoder applied the wrong QP, which shows as ghosts
 of older text rather than decode errors. iHD and iris (the GL driver
 behind `DmabufReader`) keep separate GEM handle tables, so the reader
 opens a DRM file of its own: sharing the encoder's left a refined
-session's tile shaders reading blank buffers.
+session's tile shaders reading blank buffers. iHD reads an imported RGB
+surface at its pitch rounded up to 64 bytes and doesn't fail the import,
+so mutter's linear buffers at a width that isn't a multiple of 16
+(`width * 4` bytes a row) came out sheared. `can_import()` turns such a
+frame down, and `ScreencastHost` reads it back through `DmabufReader`
+and hands it to `push_cpu()` instead.
 
 ## NVENC
 
@@ -229,4 +234,8 @@ x264 (`encode/software/`), used when no hardware row opens or `-F` /
   Intel (Arc or Meteor Lake and newer).
 - AV1 can't crop, so non-multiple-of-8 sizes carry padding (cropped by
   spectre).
+- A VA-API session whose captured frames have a pitch that isn't a
+  multiple of 64 bytes (linear buffers at a width that isn't a multiple
+  of 16) reads every frame back and uploads it rather than importing it:
+  a copy to host memory and back, about 1.5 MB a frame at 824x460.
 - Software encode is H.264 only, by decision.

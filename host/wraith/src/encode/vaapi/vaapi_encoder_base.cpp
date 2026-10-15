@@ -265,6 +265,23 @@ std::vector<uint64_t> VaapiEncoderBase::supported_import_modifiers(uint32_t drm_
 	return {DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_MOD_INVALID};
 }
 
+// iHD (26.1, ADL-N) reads an imported RGB surface at its pitch rounded up
+// to 64 bytes, without failing the import, once the surface is 128 rows
+// or more (every GDP output is): a linear XRGB8888 buffer whose rows are
+// width * 4 bytes (mutter's at any width that isn't a multiple of 16)
+// comes out sheared by 32 bytes a row, and its last rows are read past
+// the end of the buffer. Tiled layouts' pitches are whole tiles, and
+// radeonsi's linear pitches are 256-byte aligned, so neither is turned
+// down.
+bool VaapiEncoderBase::can_import(const DmabufFrame &frame) const {
+	for (int i = 0; i < frame.n_planes; i++) {
+		if (frame.stride[i] % 64 != 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
 VASurfaceID VaapiEncoderBase::import_rgb_surface(const DmabufFrame &frame) {
 	// Assumes a single DRM object backs every plane (true of the buffers
 	// the screencast sources deliver: one linear/tiled GBM buffer, one fd). A frame with

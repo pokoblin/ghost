@@ -187,14 +187,18 @@ private:
 	// while readback_current_ (redeliver_frame() re-pushes it unread).
 	std::vector<uint8_t> readback_;
 	bool readback_current_ = false;
+	// This capture's first frame the encoder couldn't import has been logged.
+	bool unimportable_logged_ = false;
 	// A read-back that fails mid-session drops the reader for good and
 	// reopens the capture asking for memfd frames -- from the event loop,
 	// since the capture can't be torn down inside its own frame callback.
 	IdleCoalescer reopen_without_reader_;
 	void give_up_reader();
 	// One dmabuf frame to the encoder: with a GPU tile source if it takes
-	// one, else read back and pushed as CPU pixels if it wants those
-	// (`fresh`: a new frame, not a re-push), else zero-copy.
+	// one, else read back and pushed as CPU pixels if it wants those or
+	// can't import this frame (`fresh`: a new frame, not a re-push), else
+	// zero-copy. Without a reader, an unimportable frame goes zero-copy
+	// anyway.
 	void deliver_dmabuf(const DmabufFrame &frame, void *token, int64_t pts_us, const DamageRegion *damage,
 		bool fresh);
 	// A CPU frame is either held (the producer lent its buffer:
