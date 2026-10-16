@@ -160,6 +160,11 @@ if(NOT WIN32)
   target_link_libraries(gdp_ca_trust_test PRIVATE gdp OpenSSL::Crypto)
   add_test(NAME gdp_ca_trust_test COMMAND gdp_ca_trust_test)
 
+  # Also the openssl CLI and /tmp: additional streams (gdp-spec.md §2.2).
+  add_executable(gdp_additional_stream_test tests/additional_stream_test.cpp)
+  target_link_libraries(gdp_additional_stream_test PRIVATE gdp)
+  add_test(NAME gdp_additional_stream_test COMMAND gdp_additional_stream_test)
+
   add_executable(gdp_stream_loss_test tests/stream_loss_test.cpp)
   target_link_libraries(gdp_stream_loss_test PRIVATE gdp Threads::Threads)
   add_test(NAME gdp_stream_loss_test COMMAND gdp_stream_loss_test)

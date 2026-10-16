@@ -68,7 +68,18 @@ struct Stream::Impl {
 	// Host thread only; see the lifetime model in transport.cpp.
 	Stream *self = nullptr;
 	std::weak_ptr<Impl> weak_self;
+	// on_acked's coalescing: the network thread stores the latest total and
+	// posts an event only when none is already waiting.
+	std::atomic<uint64_t> acked{0};
+	std::atomic<bool> acked_posted{false};
 };
+
+// The first stream ID beyond gdp-spec.md §2.2's control (0) and input (4):
+// additional streams, which carry a StreamOpen and their own kind's protocol.
+constexpr int64_t kFirstAdditionalStream = 8;
+inline bool is_additional_stream(int64_t id) {
+	return id >= kFirstAdditionalStream;
+}
 
 struct Connection::Impl {
 	Impl(std::shared_ptr<TransportCore> core, bool is_server);
@@ -84,6 +95,10 @@ struct Connection::Impl {
 	ConnectionState state = ConnectionState::kConnecting;
 	std::unique_ptr<Stream> control_stream;
 	std::unique_ptr<Stream> input_stream;
+	// Client: the ID the next open_stream() gets. Client-initiated
+	// bidirectional IDs go up by 4 in the order the streams are opened, and
+	// every open goes through the same queue (pending_open), in order.
+	int64_t next_stream_id = kFirstAdditionalStream;
 	// Set by closures posted before the kShutdown one, so always in place
 	// by the time on_state_changed(kShutdown) runs.
 	std::string shutdown_reason;
@@ -132,6 +147,20 @@ struct Connection::Impl {
 		bool fin_requested = false;
 		bool fin_sent = false;
 		bool blocked = false; // flow control; cleared when credit arrives
+		// Additional streams (is_additional_stream()): the stream's receive
+		// credit comes back through Stream::consume(), not on receipt.
+		bool manual_credit = false;
+		bool peer_fin = false;   // the peer's FIN has arrived
+		bool peer_reset = false; // the peer reset its direction
+		bool closed = false;     // ngtcp2 has closed it (stream_close)
+		// The host let go of a stream that had finished both ways: kept only
+		// until ngtcp2 closes it, since it may still read the chunks below.
+		bool released = false;
+		// Client: aborted while still waiting for credit. Opened anyway when
+		// its turn comes (the streams queued behind it are numbered after
+		// it), and reset at once with `abort_code`.
+		bool abort_on_open = false;
+		uint64_t abort_code = 0;
 		// Sent-but-unacked and unsent bytes, oldest first. ngtcp2 keeps
 		// pointers into these until the peer acks them, so a chunk is only
 		// dropped once acked_stream_data_offset covers all of it.
@@ -165,6 +194,9 @@ struct Connection::Impl {
 		// Client streams opened by the host, waiting for the peer's stream
 		// credit before ngtcp2 can open them, in order.
 		std::deque<int64_t> pending_open;
+		// Server: allow_streams() was called, so the client's additional
+		// streams are taken, and each one that closes is replaced.
+		bool additional_streams = false;
 
 		uint64_t next_dgram_id = 1;
 		struct InFlight {
@@ -224,7 +256,13 @@ struct Connection::Impl {
 	// Network thread: host-requested stream work.
 	void open_stream(int64_t id, std::weak_ptr<Stream::Impl> stream);
 	void stream_send(int64_t id, std::vector<uint8_t> data, bool fin);
-	void stream_abort(int64_t id);
+	// Resets the stream both ways with `error_code` and forgets it.
+	void stream_abort(int64_t id, uint64_t error_code = 0);
+	// The host destroyed its Stream: one that finished both ways is let go
+	// quietly, anything else aborted.
+	void stream_release(int64_t id);
+	void stream_consume(int64_t id, size_t len);
+	void allow_streams(uint32_t count);
 
 	// Any thread.
 	void refill_pacing_tokens(uint64_t now_us); // caller holds datagram_mutex

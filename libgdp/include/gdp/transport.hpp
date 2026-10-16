@@ -82,10 +82,39 @@ public:
 
 	void close();
 
+	// Ends the stream in both directions at once (RESET_STREAM and
+	// STOP_SENDING) with `error_code` as the application error code
+	// (gdp-spec.md §2.2, §12). What close() and the destructor do, with
+	// code 0.
+	void reset(uint64_t error_code);
+
+	// Additional streams only (gdp-spec.md §2.2, Connection::open_stream()
+	// and on_stream): received data holds on to the stream's flow-control
+	// window until the application hands it back here, so a reader that
+	// can't keep up (a file written to a slow disk) holds the sender back
+	// rather than piling up in memory. Control and input hand their credit
+	// back on receipt and ignore this. The connection's own window is always
+	// handed back on receipt, so one slow stream never blocks the others.
+	void consume(size_t len);
+
 	// Fires only from dispatch(), on the calling thread. Destroying the
-	// Stream (or the Connection that owns it) from inside it is safe. A
-	// stream's end is observed through its Connection's state, not here.
+	// Stream (or the Connection that owns it) from inside it is safe. The
+	// end of control and input is observed through their Connection's
+	// state; additional streams also report their own, below.
 	std::function<void(const uint8_t *data, size_t len)> on_data;
+
+	// Additional streams. The peer finished its direction (a FIN after the
+	// last on_data). Fires at most once.
+	std::function<void()> on_fin;
+	// Additional streams. The peer reset its direction (RESET_STREAM) with
+	// `error_code`: whatever it was sending will not be completed.
+	std::function<void(uint64_t error_code)> on_reset;
+	// Additional streams. How many bytes of what this side sent the peer
+	// has acknowledged, a running total from the start of the stream.
+	// Coalesced: several acks between two dispatch() calls fire once, with
+	// the latest total. What a sender paces itself by, so a large transfer
+	// is fed in as it drains instead of queued whole.
+	std::function<void(uint64_t acked)> on_acked;
 
 private:
 	std::shared_ptr<Impl> impl_;
@@ -150,6 +179,23 @@ public:
 	// the host takes stream 0 as control, whatever the client meant by it.
 	Stream *open_control_stream();
 	Stream *open_input_stream();
+
+	// Client-only: opens an additional stream (gdp-spec.md §2.2), whose
+	// first frame must be a StreamOpen naming its kind. The caller owns it;
+	// destroying it before both directions have finished (a FIN each way)
+	// resets it with code 0, after that simply lets it go. Null server-side
+	// or before the input stream. The host grants additional streams only
+	// once a capability that uses them is in effect (allow_streams()): until
+	// then the stream waits for that credit, and anything sent on it is
+	// held.
+	std::unique_ptr<Stream> open_stream();
+
+	// Server-only: lets the client keep `count` additional streams open at
+	// once (MAX_STREAMS), on top of control and input, and replaces each
+	// one that closes. Call it once a capability that uses them is in
+	// effect; until then any stream beyond control and input is refused
+	// with UNSUPPORTED. Further calls raise the limit by `count` more.
+	void allow_streams(uint32_t count);
 
 	// Queues one datagram. Fails (returning false, sending nothing) if the peer never enabled
 	// datagrams or `len` exceeds max_datagram_size() -- refused outright rather than dropped unseen
@@ -232,6 +278,11 @@ public:
 	// packets can be reordered in flight.
 	std::function<void(Stream *)> on_control_stream;
 	std::function<void(Stream *)> on_input_stream;
+	// Server-only: an additional stream the client opened (only after
+	// allow_streams()). Ownership passes to the handler, which reads the
+	// StreamOpen and resets the stream with UNSUPPORTED if it doesn't take
+	// that kind. Without a handler the stream is reset with UNSUPPORTED.
+	std::function<void(std::unique_ptr<Stream>)> on_stream;
 	// `arrival_us` is monotonic_us() when the network thread read the
 	// datagram off the socket -- dispatch() runs later, and on some hosts much
 	// later (a timer-polled loop), so this is the time to measure arrival
