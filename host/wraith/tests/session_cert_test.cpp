@@ -36,7 +36,9 @@ int main() {
 
 	gdp::Transport server;
 	gdp::Transport client;
-	const uint16_t port = 44345; // fixed test port; libgdp's tests hold 44339, 44341-44342 and 44360
+	// Fixed test port. libgdp's tests hold 44339, 44341-44343 and 44360;
+	// file_receiver_test 44351.
+	const uint16_t port = 44345;
 	std::unique_ptr<gdp::Connection> accepted;
 	bool listening = server.listen(port, "gdp-test/1", cert.cert_path(), cert.key_path(),
 		[&](std::unique_ptr<gdp::Connection> conn) { accepted = std::move(conn); });

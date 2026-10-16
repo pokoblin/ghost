@@ -121,7 +121,7 @@ int main() {
 	TempCert cert;
 	gdp::Transport server_transport;
 	gdp::Transport client_transport;
-	const uint16_t port = 44341;
+	const uint16_t port = 44343; // fixed test port: 44341-44342 are stream_loss_test's
 	const char *alpn = "gdp-test/1";
 
 	std::unique_ptr<gdp::Connection> server_conn;
