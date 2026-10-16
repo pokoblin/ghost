@@ -80,6 +80,7 @@ add_library(gdp STATIC
   src/error_codes.cpp
   src/negotiation.cpp
   src/clipboard.cpp
+  src/file_transfer.cpp
   src/video_codec.cpp
   src/refine.cpp
   src/video_reassembler.cpp
@@ -143,6 +144,10 @@ add_test(NAME gdp_error_codes_test COMMAND gdp_error_codes_test)
 add_executable(gdp_clipboard_test tests/clipboard_test.cpp)
 target_link_libraries(gdp_clipboard_test PRIVATE gdp)
 add_test(NAME gdp_clipboard_test COMMAND gdp_clipboard_test)
+
+add_executable(gdp_file_transfer_test tests/file_transfer_test.cpp)
+target_link_libraries(gdp_file_transfer_test PRIVATE gdp)
+add_test(NAME gdp_file_transfer_test COMMAND gdp_file_transfer_test)
 
 add_executable(gdp_refine_test tests/refine_test.cpp)
 target_link_libraries(gdp_refine_test PRIVATE gdp)
