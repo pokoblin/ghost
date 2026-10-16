@@ -4,7 +4,7 @@
 
 GDP carries a remote Linux desktop session over QUIC: authentication and
 session selection, a low-latency video and audio stream, and the user's
-input, clipboard and game controllers. This document defines every byte
+input, clipboard, files and game controllers. This document defines every byte
 that crosses the network between GDP's components and the rules for
 producing and acting on them. It is normative. The protocol buffer
 definitions in `libgdp/proto/` and `host/proto/` carry the same messages
@@ -158,7 +158,7 @@ The streams are identified by their IDs, not by the order in which their
 data arrives. Datagrams carry video and audio (§9, §10).
 
 **Additional streams.** A feature that needs another reliable stream
-(none is defined in this version) opens it after `SessionAccept`, from
+(`file`, §7.12) opens it after `SessionAccept`, from
 either side, and only on a session that negotiated the capability of the
 same name (§6.7). The first frame (§3.1) on such a stream MUST be a
 `StreamOpen`:
@@ -175,7 +175,15 @@ did not negotiate MUST reset it (`RESET_STREAM` and `STOP_SENDING`) with
 feature that uses streams is negotiated, a peer SHOULD grant no credit for
 streams beyond control and input (`initial_max_streams_bidi` of 2 at the
 host, 0 at the client; `initial_max_streams_uni` of 0); a feature raises
-the limits with `MAX_STREAMS` when it is negotiated.
+the limits with `MAX_STREAMS` when it is negotiated. A limit raised that
+way counts streams open at once: each time one of those streams closes,
+the peer that granted it sends `MAX_STREAMS` for one more.
+
+A peer SHOULD send control and input data ahead of an additional
+stream's, and SHOULD hand back its connection-level flow-control credit
+for an additional stream's data as it receives it, whatever it does with
+the stream's own: a slow additional stream then never holds up the
+session.
 
 ### 2.3 Certificates and host identity
 
@@ -917,6 +925,7 @@ capability is still right.
 | `gamepad` | defined | §8.5 |
 | `hid` | defined | §8.6 |
 | `microphone` | defined | §6.8, §10.1 |
+| `file` | defined | §7.12, an additional stream kind (§2.2) |
 | `usb` | reserved | an additional stream kind (§2.2) |
 
 Anything that changes the meaning of bytes an existing peer already
@@ -1382,6 +1391,88 @@ unchanged, on the host, in the user's own account; it is never sent
 anywhere else. The request is unconditional, needs no capability, and a
 client that does not know it ignores it (§16), so the host MUST NOT wait
 for the answer indefinitely.
+
+### 7.12 File transfer
+
+With the `file` capability in effect, the client sends files to the host,
+one additional stream (§2.2) of kind `file` per file. The client opens
+every `file` stream; the host never does. A host offers the capability
+only if it has somewhere to put received files (§17, "File transfer"), and
+on accepting it grants the client 4 `file` streams at once (§2.2); a
+client with more files to send queues them.
+
+The stream's `StreamOpen.params` is a `FileOpen`, whose `oneof` holds a
+`FileOffer` (case 1; case 2 is reserved for transfers towards the client):
+
+| # | Field | Type | Meaning |
+|---|---|---|---|
+| 1 | `name` | string | The file's own name, without any path. |
+| 2 | `size` | uint64 | Its length in bytes. |
+| 3 | `modified_unix_ms` | int64 | Its modification time, ms since the Unix epoch; 0 if unknown. |
+
+Everything the host sends on the stream is a `FileReply` frame (§3.1),
+a `oneof` of `accepted` (1, `FileAccepted`, no fields), `refused` (2,
+`FileError`), `saved` (3, `FileSaved`) and `failed` (4, `FileError`).
+`FileError` has one field, `code` (1, `FileErrorCode`); `FileSaved` has
+one, `name` (1, string).
+
+| Code | Name | Meaning |
+|---|---|---|
+| 0 | `FILE_ERROR_UNSPECIFIED` | |
+| 1 | `FILE_ERROR_UNSUPPORTED` | The `FileOpen` case is not one the host knows. |
+| 2 | `FILE_ERROR_BAD_NAME` | The name breaks the rules below. |
+| 3 | `FILE_ERROR_NO_SPACE` | Not enough free space, at the offer or while writing. |
+| 4 | `FILE_ERROR_REFUSED` | The host's policy or its user said no. |
+| 5 | `FILE_ERROR_WRITE_FAILED` | Any other failure to store the file. |
+| 6 | `FILE_ERROR_SIZE_MISMATCH` | The stream ended before `size` bytes, or carried more. |
+
+The exchange:
+
+1. The client opens the stream and sends the `StreamOpen`.
+2. The host answers with `accepted`, or with `refused` and then FIN.
+   A host MUST hold the `StreamOpen` frame to 4096 bytes: a longer one is
+   `FRAME_TOO_LARGE` (§3.1).
+3. After `accepted`, and not before, the client sends exactly `size`
+   bytes of the file, unframed, then FIN. A client that receives
+   `refused` sends nothing more and finishes its direction with FIN.
+4. When the client's FIN arrives after exactly `size` bytes, the host
+   stores the file and answers with `saved`, carrying the name it was
+   stored under, then FIN. If the FIN comes early or more than `size`
+   bytes arrive, it discards the file and answers `failed` with
+   `FILE_ERROR_SIZE_MISMATCH`, then FIN, and sends `STOP_SENDING` (code
+   0) if bytes are still coming. A host that cannot go on (no space, a
+   write error) answers `failed` with the code that says why, then FIN,
+   and sends `STOP_SENDING` (code 0).
+
+Either peer cancels a transfer by resetting the stream both ways
+(`RESET_STREAM` and `STOP_SENDING`) with code 0. The host discards
+whatever it has of a file whose stream is reset, and of every file whose
+stream is still open when the connection ends; there is no resumption
+in this version. A client that has had no `FileReply` 30 s after sending
+its offer resets the stream. A host that receives file bytes before it
+has sent `accepted`, a frame that does not parse as `FileReply` (client)
+or a second frame where none belongs (host), closes the connection with
+`MALFORMED_FRAME`.
+
+Rules for `name`, checked by the client before it offers a file and by
+the host before it accepts one (`FILE_ERROR_BAD_NAME`):
+
+- It is valid UTF-8, not empty, and at most 255 bytes.
+- It contains no `/`, `\` or control character (U+0000 to U+001F,
+  U+007F), and is not `.` or `..`.
+- The client sends it in Unicode Normalization Form C, since the host's
+  file system treats names as bytes.
+
+A file's integrity rests on QUIC's: there is no checksum. Folders are not
+transferred in this version; a client offers the files in one, if it
+offers anything.
+
+*Host behavior:* the reference host stores files in the user's download
+directory (`XDG_DOWNLOAD_DIR`, else `~/Downloads`), writing to a new
+`name.part` and renaming it once complete, and never overwrites a file:
+when a name is taken it tries `name (1).ext`, `name (2).ext` and so on.
+It checks for `size` bytes of free space before accepting, and shows one
+desktop notification when a batch of transfers has finished.
 
 ---
 
@@ -2259,8 +2350,8 @@ Registries, all lowercase tokens unless stated:
 | Datagram channels | §3.2 | 0x01 video, 0x02 audio, 0x03 microphone |
 | Video codecs | §6.6 | `h264`, `h265`, `av1`, `pyrowave` |
 | Audio codecs | §6.8 | `opus` |
-| Capabilities | §6.7 | `clipboard`, `refine`, `gamepad`, `hid`, `microphone`; `usb` reserved |
-| Stream kinds | §2.2 | none; `usb` reserved |
+| Capabilities | §6.7 | `clipboard`, `refine`, `gamepad`, `hid`, `microphone`, `file`; `usb` reserved |
+| Stream kinds | §2.2 | `file`; `usb` reserved |
 | Clipboard MIME types | §7.9 | `text/plain` |
 | Refinement tile formats | §9.5 | 0 `BGR8` |
 | Error codes | §12, §13.3 | as listed |
@@ -2344,8 +2435,17 @@ peer. Receivers MUST bound what they allocate from them: frame lengths
 (§3.1), slice counts (§9.3), refinement tile areas (§9.5, 64 MiB),
 cursor images (§7.4, 384 pixels a side), clipboard data (§7.9, 1 MiB −
 1 KiB), gamepad slots and arrays (§8.5), HID descriptors and reports
-(§8.6, 4096 bytes). Gamepad names
-and `client_id` are for logs only.
+(§8.6, 4096 bytes), a file's opening frame (§7.12, 4096 bytes). A
+`FileOffer.size` says how much is coming, not how much to allocate.
+Gamepad names and `client_id` are for logs only.
+
+**File transfer.** `file` (§7.12) lets the attached client put files in
+its own user's account on the host, which the same client could already
+do by typing. A host MUST NOT let a received name choose where a file
+goes (no paths, no `..`, no following a symbolic link at the target),
+MUST NOT overwrite or execute anything, and SHOULD keep received files
+in one directory the user knows to look in. A client sends only files
+its user chose to send, never on its own.
 
 **Raw controllers.** A HID device's identity and descriptor decide which
 of the host's drivers binds to it and what that driver makes of it, so
@@ -2363,7 +2463,7 @@ or a sound. The reference
 implementation fuzzes its datagram, refinement-container and control
 parsers.
 
-**Privacy of the session.** Video, audio, input and clipboard are
+**Privacy of the session.** Video, audio, input, clipboard and files are
 encrypted by QUIC between the client and the session agent (or the
 gateway). The clipboard capability sends whatever the user copies on
 either side to the other; a client SHOULD let its user turn it off.
@@ -2389,6 +2489,9 @@ either side to the other; a client SHOULD let its user turn it off.
 | Frame train: minimum datagrams; per report | 16; 8 | §7.5 |
 | `GatewayPath` interval | about 1 s | §6.10 |
 | Clipboard data, maximum | 1 047 552 bytes (1 MiB − 1 KiB) | §7.9 |
+| File streams at once | 4 | §7.12 |
+| File name, maximum; opening frame, maximum | 255 bytes; 4096 bytes | §7.12 |
+| File offer, reply deadline | 30 s | §7.12 |
 | `DiagnosticsReport` text, maximum | 512 KiB | §7.11 |
 | Gamepad slots; axes; buttons | 4; 6; 26 | §8.5 |
 | HID report descriptor; report | 4096 bytes; 4096 bytes | §8.6 |
@@ -2423,6 +2526,8 @@ every implementation listed for it.
 | Codec and capability negotiation | `libgdp/include/gdp/negotiation.hpp`, `video_codec.hpp`, `audio_format.hpp` |
 | Refinement container | `libgdp/include/gdp/refine.hpp`; `host/veil/app/refine.js` |
 | Clipboard rules | `libgdp/include/gdp/clipboard.hpp` |
+| Additional streams | `Connection::open_stream()`, `allow_streams()` and `on_stream` in `libgdp/include/gdp/transport.hpp` |
+| File transfer rules | `libgdp/include/gdp/file_transfer.hpp`; `host/wraith/src/session/file_receiver.cpp` (the host) |
 | Gamepad order | `libgdp/include/gdp/gamepad.hpp` |
 | Session clock | `libgdp/include/gdp/clock.hpp` |
 | Error codes | `libgdp/include/gdp/error_codes.hpp` (pinned by `error_codes_test`); `LobbyErrorCode` in `lobby.proto`; `host/veil/app/session.js` |
