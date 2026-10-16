@@ -58,7 +58,7 @@ Stream::Stream(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {
 Stream::~Stream() {
 	impl_->self = nullptr;
 	// Dropping a stream on its own aborts it, unless it is an additional
-	// stream that already finished both ways (stream_release()).
+	// stream whose own direction is finished (stream_release()).
 	// Not when its whole connection is going: that close covers it.
 	auto conn = impl_->conn.lock();
 	if (conn && conn->self) {

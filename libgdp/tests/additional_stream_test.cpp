@@ -341,6 +341,39 @@ int main() {
 		assert(pump_until(client_transport, server_transport, 5000, [&] { return received.back()->reset; }));
 		assert(received.back()->reset_code == 0);
 		assert(!received.back()->fin);
+
+		// 8. A host that gives up mid-way: its last word and FIN, then it
+		// lets the stream go while the client is still sending. The reply
+		// still arrives (the release stops only the reading), and the
+		// client is not reset -- it just isn't read any more.
+		Sent refused;
+		refused.stream = client_conn->open_stream();
+		watch(refused);
+		std::vector<uint8_t> lots = pattern(4 << 20, 9);
+		refused.stream->send(lots.data(), lots.size());
+		want = received.size() + 1;
+		assert(pump_until(client_transport, server_transport, 5000,
+			[&] { return received.size() == want && !received.back()->data.empty(); }));
+		const char *last_word = "failed";
+		received.back()->stream->send(reinterpret_cast<const uint8_t *>(last_word), strlen(last_word), true);
+		received.back()->stream.reset();
+		assert(pump_until(client_transport, server_transport, 5000, [&] { return refused.fin; }));
+		assert(refused.reply == last_word);
+		assert(!refused.reset);
+		refused.stream.reset();
+
+		// The allowance came back from both: two more streams still open.
+		for (int i = 0; i < 2; i++) {
+			Sent s;
+			s.stream = client_conn->open_stream();
+			watch(s);
+			s.stream->send(reinterpret_cast<const uint8_t *>("ok"), 2, true);
+			want = received.size() + 1;
+			assert(pump_until(client_transport, server_transport, 5000,
+				[&] { return received.size() == want && received.back()->fin; }));
+			received.back()->stream->send(nullptr, 0, true);
+			assert(pump_until(client_transport, server_transport, 5000, [&] { return s.fin; }));
+		}
 	}
 
 	(void)server_control;

@@ -51,6 +51,11 @@ class Stream {
 public:
 	Stream(const Stream &) = delete;
 	Stream &operator=(const Stream &) = delete;
+	// Resets the stream both ways with code 0 -- except an additional
+	// stream whose own direction this side already finished (send() with
+	// `fin`): that one is let go gracefully, so what was sent before the
+	// FIN still arrives, and the peer is only asked to stop sending
+	// (STOP_SENDING, code 0) if it hasn't finished either.
 	~Stream();
 
 	// Public, but not meaningfully callable from outside src/transport/:
@@ -182,8 +187,7 @@ public:
 
 	// Client-only: opens an additional stream (gdp-spec.md §2.2), whose
 	// first frame must be a StreamOpen naming its kind. The caller owns it;
-	// destroying it before both directions have finished (a FIN each way)
-	// resets it with code 0, after that simply lets it go. Null server-side
+	// see ~Stream() for what dropping it does. Null server-side
 	// or before the input stream. The host grants additional streams only
 	// once a capability that uses them is in effect (allow_streams()): until
 	// then the stream waits for that credit, and anything sent on it is

@@ -955,8 +955,7 @@ void Connection::Impl::stream_release(int64_t id) {
 		return;
 	}
 	NetStream &ns = it->second;
-	bool finished = ns.fin_sent && ns.peer_fin && !ns.peer_reset;
-	if (!is_additional_stream(id) || !finished) {
+	if (!is_additional_stream(id) || !ns.fin_requested) {
 		stream_abort(id);
 		return;
 	}
@@ -964,9 +963,14 @@ void Connection::Impl::stream_release(int64_t id) {
 		net.streams.erase(it);
 		return;
 	}
-	// Both FINs are out, but ngtcp2 may still be waiting for the ack of
-	// ours and reads its data from `chunks` until then: dropped in
-	// stream_close.
+	// Our direction is finished: let what is still on its way arrive (a
+	// last reply before the FIN), and only stop reading the peer's, unless
+	// that already ended too.
+	if (ns.opened && !ns.peer_fin && !ns.peer_reset) {
+		ngtcp2_conn_shutdown_stream_read(net.conn, 0, id, 0);
+	}
+	// ngtcp2 reads our unacked data from `chunks` until the stream closes:
+	// dropped in stream_close.
 	ns.stream.reset();
 	ns.released = true;
 }
