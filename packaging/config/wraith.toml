@@ -131,3 +131,14 @@
 
 [refine.mobile]
 #settle_ms = 250
+
+[files]
+# File transfer: files the user sends from the client (dragged onto the
+# session, or picked with "Send Files") land in their download directory,
+# never over an existing file (docs/design/file-transfer.md). false stops
+# offering it to clients.
+#receive = true
+
+# Where received files go. Empty is the user's download directory
+# (XDG_DOWNLOAD_DIR, else ~/Downloads); "~/" at the start is their home.
+#directory = ""

@@ -64,9 +64,10 @@ anything else needs a restart, which ends every gateway session.
 `[log] level`, `[network]` (congestion control, pacing, the rate
 trace), `[encode]` (GOP length, bitrate ceiling, forcing the software
 encoder, NVENC's zero-copy input, the bit depth, PyroWave's ceiling, and
-which codecs are offered) and `[refine]` (lossless refinement's settle time and
+which codecs are offered), `[refine]` (lossless refinement's settle time and
 bandwidth budget, with per-profile overrides in `[refine.lan]`,
-`[refine.internet]` and `[refine.mobile]`). It differs from ghostd.toml
+`[refine.internet]` and `[refine.mobile]`) and `[files]` (whether clients
+may send files, and where they go). It differs from ghostd.toml
 because of who reads it:
 
 - **Read per session.** Each wraith reads it once at startup, so a

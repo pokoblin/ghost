@@ -1468,11 +1468,11 @@ transferred in this version; a client offers the files in one, if it
 offers anything.
 
 *Host behavior:* the reference host stores files in the user's download
-directory (`XDG_DOWNLOAD_DIR`, else `~/Downloads`), writing to a new
-`name.part` and renaming it once complete, and never overwrites a file:
-when a name is taken it tries `name (1).ext`, `name (2).ext` and so on.
-It checks for `size` bytes of free space before accepting, and shows one
-desktop notification when a batch of transfers has finished.
+directory (`XDG_DOWNLOAD_DIR`, else `~/Downloads`), writing to a hidden
+temporary file there and renaming it once complete, and never overwrites
+a file: when a name is taken it tries `name (1).ext`, `name (2).ext` and
+so on. It checks for `size` bytes of free space before accepting, and
+shows one desktop notification when a batch of transfers has finished.
 
 ---
 

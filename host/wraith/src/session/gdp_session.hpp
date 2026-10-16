@@ -18,6 +18,7 @@
 #include "gdp/framing.hpp"
 #include "gdp/gamepad.hpp"
 #include "gdp/transport.hpp"
+#include "session/file_receiver.hpp"
 #include "session/gamepad_devices.hpp"
 #include "session/raw_controllers.hpp"
 #include "session/path_rate_estimator.hpp"
@@ -249,6 +250,9 @@ private:
 	// An incoming ClipboardData: validates mime/size, then applies it to
 	// the local clipboard. Dropped, never forwarded, if anything is off.
 	void handle_clipboard_data(const gdp::session::ClipboardData &clipboard);
+	// From accept_session(), once "file" is in effect (gdp-spec.md §7.12):
+	// grants the client its file streams and hands each one to files_.
+	void start_file_receiver();
 
 	// The three gamepad input messages (gdp-spec.md §8.5).
 	// Each is a no-op unless the session negotiated "gamepad"; a client
@@ -335,6 +339,14 @@ private:
 	// attaches seconds before the captured compositor is up). Applied when
 	// the sink appears; dropped with the session otherwise.
 	std::string pending_clipboard_text_;
+	// Where received files go, settled before SessionAccept (empty: the
+	// "file" capability isn't offered), and the session's receiver once it
+	// is in effect. files_close_ closes the connection for a client that
+	// broke the file stream's protocol, from outside the stream callback
+	// that found out.
+	std::string file_directory_;
+	std::unique_ptr<FileReceiver> files_;
+	IdleCoalescer files_close_;
 	// The client's forwarded controllers, or null on a host that can't
 	// create them. Per-client, like the clipboard echo state: every slot
 	// is disconnected in reset_session(), so a client going away unplugs

@@ -118,6 +118,19 @@ public:
 		fail(*node, std::string(section) + "." + key + " must be \"auto\" or 8");
 	}
 
+	// Any string.
+	void text(const toml::table *table, const char *section, const char *key, std::string *out) {
+		const toml::node *node = find(table, key);
+		if (!node) {
+			return;
+		}
+		if (const auto *value = node->as_string()) {
+			*out = value->get();
+			return;
+		}
+		fail(*node, std::string(section) + "." + key + " must be a string");
+	}
+
 	// A string that must be one of `choices`.
 	void choice(const toml::table *table, const char *section, const char *key,
 		std::initializer_list<const char *> choices, std::string *out) {
@@ -259,7 +272,7 @@ ConfigLoad load_config(const std::string &path) {
 
 	WraithConfig next;
 	Reader reader(&result);
-	reader.unknown_sections(root, {"log", "network", "encode", "refine"});
+	reader.unknown_sections(root, {"log", "network", "encode", "refine", "files"});
 
 	const toml::table *log = reader.section(root, "log", {"level"});
 	std::string level = level_name(next.log.level);
@@ -318,6 +331,10 @@ ConfigLoad load_config(const std::string &path) {
 		}
 	}
 
+	const toml::table *files = reader.section(root, "files", {"receive", "directory"});
+	reader.boolean(files, "files", "receive", &next.files.receive);
+	reader.text(files, "files", "directory", &next.files.directory);
+
 	if (result.ok) {
 		g_config = next;
 	}
@@ -358,6 +375,9 @@ std::string describe_config(const WraithConfig &config) {
 			}
 		}
 	}
+	out << "\n[files]\n"
+		<< "receive = " << flag(config.files.receive) << "\n"
+		<< "directory = \"" << config.files.directory << "\"\n";
 	return out.str();
 }
 
