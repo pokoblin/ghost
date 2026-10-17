@@ -135,6 +135,8 @@ private:
 
 	struct wl_event_loop *loop_;
 	std::string directory_;
+	// directory_ as FileSaved tells the client: absolute, no trailing '/'.
+	std::string shown_directory_;
 	std::function<void(uint64_t)> on_protocol_error_;
 	Notifier notifier_;
 	mode_t file_mode_ = 0644;

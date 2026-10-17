@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 
 #include <fcntl.h>
@@ -184,6 +185,12 @@ FileReceiver::FileReceiver(struct wl_event_loop *loop, std::string directory,
 	std::function<void(uint64_t)> on_protocol_error, Notifier notifier)
 	: loop_(loop), directory_(std::move(directory)), on_protocol_error_(std::move(on_protocol_error)),
 	  notifier_(notifier ? std::move(notifier) : Notifier(desktop_notification)) {
+	std::error_code ec;
+	std::filesystem::path shown = std::filesystem::absolute(directory_, ec);
+	shown_directory_ = ec ? directory_ : shown.lexically_normal().string();
+	while (shown_directory_.size() > 1 && shown_directory_.back() == '/') {
+		shown_directory_.pop_back();
+	}
 	// Received files get the permissions a newly created file would.
 	mode_t mask = umask(0);
 	umask(mask);
@@ -410,6 +417,7 @@ void FileReceiver::finish(Transfer *t) {
 
 	gdp::session::FileReply reply;
 	reply.mutable_saved()->set_name(saved);
+	reply.mutable_saved()->set_directory(shown_directory_);
 	t->stream->send_message(reply);
 	t->stream->send(nullptr, 0, true);
 	if (saved == t->name) {

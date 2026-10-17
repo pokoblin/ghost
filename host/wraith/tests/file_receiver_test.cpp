@@ -213,6 +213,7 @@ int main() {
 	CHECK(loop.until(10000, [&] { return a->fin; }));
 	CHECK(a->has(R::kAccepted) && a->has(R::kSaved));
 	CHECK(a->replies.back().saved().name() == "report.pdf");
+	CHECK(a->replies.back().saved().directory() == dir); // where the client's user will look
 	CHECK(read_file(dir + "/report.pdf") == report);
 	struct stat st;
 	CHECK(stat((dir + "/report.pdf").c_str(), &st) == 0);

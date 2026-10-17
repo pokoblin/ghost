@@ -77,6 +77,8 @@ destroyed with it.
   same; without links (FAT) a check and a plain rename. A temporary
   file left by a crash is hidden, and the next session doesn't clean it
   up.
+- **Telling the client.** `saved` carries the name the file got and the
+  folder, as an absolute path, so the client can say where to find it.
 - **Permissions and time.** `0666 & ~umask`, like any new file; the
   modification time from the offer.
 - **Space.** The offer is refused unless the file plus 64 MiB fits.
