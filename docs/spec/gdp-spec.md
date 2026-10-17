@@ -1417,7 +1417,11 @@ Everything the host sends on an offer's stream is a `FileReply` frame
 (§3.1), a `oneof` of `accepted` (1, `FileAccepted`, no fields), `refused`
 (2, `FileError`), `saved` (3, `FileSaved`) and `failed` (4, `FileError`);
 case 5, `sending`, answers a request. `FileError` has one field, `code`
-(1, `FileErrorCode`); `FileSaved` has one, `name` (1, string).
+(1, `FileErrorCode`); `FileSaved` has two, `name` (1, string), the name
+the file was stored under, and `directory` (2, string), the folder it is
+in: an absolute path on the host, for the client to tell its user where
+the file went. A host MAY leave `directory` empty; a client shows only the
+name then.
 
 | Code | Name | Meaning |
 |---|---|---|
@@ -1442,7 +1446,7 @@ The exchange:
    `refused` sends nothing more and finishes its direction with FIN.
 4. When the client's FIN arrives after exactly `size` bytes, the host
    stores the file and answers with `saved`, carrying the name it was
-   stored under, then FIN. If the FIN comes early or more than `size`
+   stored under and the folder it is in, then FIN. If the FIN comes early or more than `size`
    bytes arrive, it discards the file and answers `failed` with
    `FILE_ERROR_SIZE_MISMATCH`, then FIN, and sends `STOP_SENDING` (code
    0) if bytes are still coming. A host that cannot go on (no space, a
@@ -2500,7 +2504,10 @@ in one directory the user knows to look in. A client sends only files
 its user chose to send, never on its own. The other way, the client can
 fetch only what the host's user copied, by its index in the latest
 `FileList`, never a path; and names from the host are held to the same
-rules before the client stores anything under them.
+rules before the client stores anything under them. `FileSaved.directory`
+shows the client a path on the host, which usually names the user's
+account; it goes only to the attached client, which sees the desktop
+anyway.
 
 **Raw controllers.** A HID device's identity and descriptor decide which
 of the host's drivers binds to it and what that driver makes of it, so
