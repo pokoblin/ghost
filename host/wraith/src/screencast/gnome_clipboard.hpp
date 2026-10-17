@@ -13,6 +13,12 @@
 //   SelectionWrite(u serial) -> h, SelectionWriteDone(u serial, b ok)
 //   signals SelectionOwnerChanged(a{sv}), SelectionTransfer(s mime, u serial)
 //
+// A copy can change the owner several times in a row (Nautilus: none,
+// then plain text, then the files), and mutter refuses a SelectionRead
+// while an earlier one is still going ("Tried to read in parallel"). So
+// a change drops the read under way, and only the last owner of a burst
+// is read, once the bus has gone quiet.
+//
 // mutter bridges this selection to Xwayland clients itself, so X11 apps
 // in the session are covered without any extra work here. Mutter times
 // out a SelectionTransfer it gets no answer to, so the write side never
@@ -51,6 +57,7 @@ private:
 	// Impl's D-Bus callbacks reach the ClipboardPipes pool through these
 	// (it's protected on the base class).
 	void read_pipe(int fd, const std::string &mime);
+	void cancel_reads();
 	void write_pipe(int fd, std::string payload, uint32_t serial);
 
 	std::unique_ptr<Impl> impl_;

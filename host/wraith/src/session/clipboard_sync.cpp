@@ -10,6 +10,7 @@
 
 #include <wayland-server-core.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -175,6 +176,16 @@ void ClipboardPipes::read(int fd, std::function<void(std::string)> done) {
 		},
 		raw);
 	transfers_.push_back(std::move(transfer));
+}
+
+void ClipboardPipes::cancel_reads() {
+	if (draining_) {
+		return;
+	}
+	// Each Transfer closes its fd and leaves the loop as it goes.
+	transfers_.erase(std::remove_if(transfers_.begin(), transfers_.end(),
+						 [](const std::unique_ptr<Transfer> &t) { return t->done != nullptr; }),
+		transfers_.end());
 }
 
 void ClipboardPipes::write(int fd, std::string text, std::function<void(bool ok)> done) {
