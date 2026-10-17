@@ -92,22 +92,17 @@ std::string numbered_file_name(const std::string &name, unsigned n) {
 	return stem + suffix + extension;
 }
 
-FileStreamReader::State FileStreamReader::feed(const uint8_t *data, size_t len) {
+FrameThenRawReader::State FrameThenRawReader::feed(const uint8_t *data, size_t len) {
 	if (state_ == State::kError) {
 		return state_;
 	}
 	buf_.insert(buf_.end(), data, data + len);
-	if (state_ == State::kOpened) {
-		return state_;
-	}
-	// One §3.1 frame, then raw bytes: FrameReader would take the bytes
-	// after the frame into its own buffer, so the frame is cut out here.
-	if (buf_.size() < kLengthPrefixSize) {
+	if (state_ == State::kFramed || buf_.size() < kLengthPrefixSize) {
 		return state_;
 	}
 	uint32_t frame_len = static_cast<uint32_t>(buf_[0]) | static_cast<uint32_t>(buf_[1]) << 8 |
 		static_cast<uint32_t>(buf_[2]) << 16 | static_cast<uint32_t>(buf_[3]) << 24;
-	if (frame_len > kMaxFileOpenFrameSize) {
+	if (frame_len > max_frame_size_) {
 		state_ = State::kError;
 		error_code_ = static_cast<uint64_t>(ErrorCode::kFrameTooLarge);
 		return state_;
@@ -116,26 +111,132 @@ FileStreamReader::State FileStreamReader::feed(const uint8_t *data, size_t len) 
 	if (buf_.size() < frame_end) {
 		return state_;
 	}
+	frame_.assign(reinterpret_cast<const char *>(buf_.data()) + kLengthPrefixSize, frame_len);
+	buf_.erase(buf_.begin(), buf_.begin() + static_cast<ptrdiff_t>(frame_end));
+	state_ = State::kFramed;
+	return state_;
+}
+
+std::vector<uint8_t> FrameThenRawReader::take_data() {
+	if (state_ != State::kFramed) {
+		return {};
+	}
+	std::vector<uint8_t> out;
+	out.swap(buf_);
+	return out;
+}
+
+FileStreamReader::State FileStreamReader::feed(const uint8_t *data, size_t len) {
+	if (state_ != State::kWaiting) {
+		if (state_ == State::kOpened) {
+			reader_.feed(data, len);
+		}
+		return state_;
+	}
+	switch (reader_.feed(data, len)) {
+	case FrameThenRawReader::State::kWaiting: return state_;
+	case FrameThenRawReader::State::kError:
+		state_ = State::kError;
+		error_code_ = reader_.error_code();
+		return state_;
+	case FrameThenRawReader::State::kFramed: break;
+	}
 	session::StreamOpen open;
-	if (frame_len != 0 && !open.ParseFromArray(buf_.data() + kLengthPrefixSize, static_cast<int>(frame_len))) {
+	if (!open.ParseFromString(reader_.frame())) {
 		state_ = State::kError;
 		error_code_ = static_cast<uint64_t>(ErrorCode::kMalformedFrame);
 		return state_;
 	}
 	kind_ = open.kind();
 	params_ = open.params();
-	buf_.erase(buf_.begin(), buf_.begin() + static_cast<ptrdiff_t>(frame_end));
 	state_ = State::kOpened;
 	return state_;
 }
 
 std::vector<uint8_t> FileStreamReader::take_data() {
-	if (state_ != State::kOpened) {
-		return {};
+	return state_ == State::kOpened ? reader_.take_data() : std::vector<uint8_t>();
+}
+
+namespace {
+
+constexpr const char *kGnomeCopiedFiles = "x-special/gnome-copied-files";
+constexpr const char *kUriList = "text/uri-list";
+
+int hex_value(char c) {
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+// The local path of a file:// URI, or "" if it isn't one.
+std::string local_path(const std::string &uri) {
+	static const std::string scheme = "file://";
+	if (uri.size() <= scheme.size() || uri.compare(0, scheme.size(), scheme) != 0) {
+		return "";
 	}
-	std::vector<uint8_t> out;
-	out.swap(buf_);
-	return out;
+	std::string rest = uri.substr(scheme.size());
+	size_t slash = rest.find('/');
+	if (slash == std::string::npos) {
+		return "";
+	}
+	std::string host = rest.substr(0, slash);
+	if (!host.empty() && host != "localhost") {
+		return "";
+	}
+	std::string path;
+	for (size_t i = slash; i < rest.size(); i++) {
+		if (rest[i] == '%' && i + 2 < rest.size() && hex_value(rest[i + 1]) >= 0 && hex_value(rest[i + 2]) >= 0) {
+			path += static_cast<char>(hex_value(rest[i + 1]) * 16 + hex_value(rest[i + 2]));
+			i += 2;
+		} else {
+			path += rest[i];
+		}
+	}
+	return path.find('\0') == std::string::npos ? path : "";
+}
+
+} // namespace
+
+std::string select_copied_files_mime(const std::vector<std::string> &offered) {
+	for (const char *mime : {kGnomeCopiedFiles, kUriList}) {
+		for (const std::string &o : offered) {
+			if (o == mime) {
+				return mime;
+			}
+		}
+	}
+	return "";
+}
+
+std::vector<std::string> copied_file_paths(const std::string &mime, const std::string &data) {
+	std::vector<std::string> paths;
+	bool gnome = mime == kGnomeCopiedFiles;
+	if (!gnome && mime != kUriList) {
+		return paths;
+	}
+	size_t start = 0;
+	bool first = true;
+	while (start <= data.size()) {
+		size_t end = data.find('\n', start);
+		std::string line = data.substr(start, end == std::string::npos ? std::string::npos : end - start);
+		start = end == std::string::npos ? data.size() + 1 : end + 1;
+		while (!line.empty() && (line.back() == '\r' || line.back() == '\0')) {
+			line.pop_back();
+		}
+		// GNOME's first line is the action ("copy" or "cut"); a URI list's
+		// comments start with '#'.
+		bool skip = (gnome && first) || line.empty() || line[0] == '#';
+		first = false;
+		if (skip) {
+			continue;
+		}
+		std::string path = local_path(line);
+		if (!path.empty()) {
+			paths.push_back(std::move(path));
+		}
+	}
+	return paths;
 }
 
 } // namespace gdp

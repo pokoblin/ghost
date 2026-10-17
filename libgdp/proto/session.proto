@@ -37,6 +37,8 @@ message ControlEnvelope {
     // Support: the host asks the client what it knows (wraith --report).
     DiagnosticsRequest diagnostics_request = 17;
     DiagnosticsReport diagnostics_report = 18;
+    // Files the host's user copied, for the client to fetch (§7.12).
+    FileList file_list = 19;
   }
 }
 
@@ -186,9 +188,29 @@ message StreamOpen {
 // FileReply{refused{FILE_ERROR_UNSUPPORTED}}.
 message FileOpen {
   oneof open {
-    FileOffer offer = 1;   // client -> host: here is a file
-    // 2 is reserved for a request (host -> client transfers).
+    FileOffer offer = 1;     // client -> host: here is a file
+    FileRequest request = 2; // host -> client: send me this one of the FileList
   }
+}
+
+// host -> client, on the control stream: the files the host's user copied.
+// Sent when the host's clipboard comes to hold copied files, with no files
+// when it no longer does, and once right after SessionAccept if it does.
+message FileList {
+  uint64 list_id = 1;               // new with every list; never 0
+  repeated FileListEntry files = 2; // in the order the user copied them
+}
+
+message FileListEntry {
+  string name = 1;              // the file's own name, §7.12's rules
+  uint64 size = 2;              // when the list was made; FileSending says what is sent
+  int64 modified_unix_ms = 3;   // 0 = unknown
+  bool directory = 4;           // a folder: not sent in this version
+}
+
+message FileRequest {
+  uint64 list_id = 1;   // the FileList it comes from
+  uint32 index = 2;     // into its files
 }
 
 message FileOffer {
@@ -204,7 +226,14 @@ message FileReply {
     FileError refused = 2;      // the offer is refused; FIN follows
     FileSaved saved = 3;        // every byte written and the file in place; FIN follows
     FileError failed = 4;       // accepted, then failed; FIN follows
+    FileSending sending = 5;    // to a FileRequest: the file's raw bytes follow, then FIN
   }
+}
+
+message FileSending {
+  string name = 1;
+  uint64 size = 2;              // exactly this many raw bytes follow
+  int64 modified_unix_ms = 3;
 }
 
 message FileAccepted {}
@@ -225,6 +254,8 @@ enum FileErrorCode {
   FILE_ERROR_REFUSED = 4;       // the receiver's policy or its user said no
   FILE_ERROR_WRITE_FAILED = 5;  // any other I/O error
   FILE_ERROR_SIZE_MISMATCH = 6; // FIN before size bytes, or more than size
+  FILE_ERROR_GONE = 7;          // a request for a list or file that is no longer there
+  FILE_ERROR_READ_FAILED = 8;   // the host couldn't read the file
 }
 
 message AudioConfig {
