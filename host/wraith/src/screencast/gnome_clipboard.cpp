@@ -10,8 +10,11 @@
 
 #include "util/log.hpp"
 
+#include <wayland-server-core.h>
+
 #include <cerrno>
 #include <cstring>
+#include <initializer_list>
 #include <vector>
 
 #include <fcntl.h>
@@ -132,6 +135,12 @@ bool read_owner_changed(sd_bus_message *m, std::vector<std::string> *mimes, bool
 struct GnomeClipboard::Impl {
 	GnomeClipboard *owner = nullptr;
 	sd_bus *bus = nullptr;
+	struct wl_event_loop *loop = nullptr;
+	// The mime to read from the latest owner, once the burst of owner
+	// changes it came in is over (empty: nothing to read).
+	std::string pending_mime;
+	struct wl_event_source *read_idle = nullptr;
+	struct wl_event_source *process_idle = nullptr;
 	std::string session_path;
 	sd_bus_slot *owner_changed_slot = nullptr;
 	sd_bus_slot *transfer_slot = nullptr;
@@ -148,15 +157,44 @@ struct GnomeClipboard::Impl {
 		if (!read_owner_changed(m, &mimes, &session_is_owner)) {
 			return 0;
 		}
-		if (session_is_owner) {
-			return 0; // the echo of our own SetSelection
+		// Whatever was being read belongs to an owner that is gone.
+		impl->owner->cancel_reads();
+		// Nothing to read from our own SetSelection's echo, nor from an
+		// owner offering nothing the wire carries (an image).
+		impl->pending_mime = session_is_owner ? std::string() : select_mime(mimes);
+		if (!impl->pending_mime.empty() && !impl->read_idle) {
+			// Not now: more changes of the same copy may be queued behind
+			// this one.
+			impl->read_idle = wl_event_loop_add_idle(impl->loop, read_latest, impl);
 		}
-		std::string mime = select_mime(mimes);
-		if (mime.empty()) {
-			return 0; // an image: nothing the wire carries
-		}
-		impl->read_selection(mime);
 		return 0;
+	}
+
+	static void read_latest(void *data) {
+		auto *impl = static_cast<Impl *>(data);
+		impl->read_idle = nullptr; // an idle source goes once it has run
+		std::string mime = std::move(impl->pending_mime);
+		impl->pending_mime.clear();
+		if (!mime.empty()) {
+			impl->read_selection(mime);
+		}
+	}
+
+	// A blocking call reads whatever else arrives on the bus while it
+	// waits, and queues it inside sd-bus: the fd won't wake the loop for
+	// it. Dispatched on the next turn of the loop instead, or a
+	// SelectionTransfer could wait for unrelated traffic (until mutter
+	// gives up on it).
+	void process_queued() {
+		if (!process_idle) {
+			process_idle = wl_event_loop_add_idle(loop, process_bus, this);
+		}
+	}
+
+	static void process_bus(void *data) {
+		auto *impl = static_cast<Impl *>(data);
+		impl->process_idle = nullptr;
+		while (sd_bus_process(impl->bus, nullptr) > 0) {}
 	}
 
 	// An app in the session is pasting from the selection we own.
@@ -176,6 +214,7 @@ struct GnomeClipboard::Impl {
 		sd_bus_message *reply = nullptr;
 		int r = sd_bus_call_method(bus, kRdService, session_path.c_str(), kRdSessionIface, "SelectionRead",
 			&error, &reply, "s", mime.c_str());
+		process_queued();
 		if (r < 0) {
 			WLOG_ERROR("clipboard: SelectionRead(%s) failed: %s", mime.c_str(), sdbus_error_text(error, r));
 			sd_bus_error_free(&error);
@@ -201,6 +240,7 @@ struct GnomeClipboard::Impl {
 		sd_bus_message *reply = nullptr;
 		int r = sd_bus_call_method(bus, kRdService, session_path.c_str(), kRdSessionIface, "SelectionWrite",
 			&error, &reply, "u", serial);
+		process_queued();
 		if (r < 0) {
 			WLOG_ERROR("clipboard: SelectionWrite(%u) failed: %s", serial, sdbus_error_text(error, r));
 			sd_bus_error_free(&error);
@@ -233,6 +273,7 @@ struct GnomeClipboard::Impl {
 				error.message ? error.message : "");
 		}
 		sd_bus_error_free(&error);
+		process_queued();
 	}
 };
 
@@ -248,6 +289,7 @@ std::unique_ptr<GnomeClipboard> GnomeClipboard::create(struct sd_bus *bus, const
 	}
 	auto impl = std::make_unique<Impl>();
 	impl->bus = bus;
+	impl->loop = loop;
 	impl->session_path = session_path;
 
 	// Subscribed before EnableClipboard: mutter reports the session's
@@ -288,6 +330,7 @@ std::unique_ptr<GnomeClipboard> GnomeClipboard::create(struct sd_bus *bus, const
 	}
 	sd_bus_error_free(&error);
 	i.clipboard_enabled = true;
+	i.process_queued(); // the current owner, reported during the call
 
 	WLOG_INFO("clipboard: mutter RemoteDesktop clipboard sync up");
 	return sink;
@@ -304,6 +347,13 @@ void GnomeClipboard::close() {
 			nullptr, nullptr, "");
 		i.clipboard_enabled = false;
 	}
+	for (struct wl_event_source **idle : {&i.read_idle, &i.process_idle}) {
+		if (*idle) {
+			wl_event_source_remove(*idle);
+			*idle = nullptr;
+		}
+	}
+	i.pending_mime.clear();
 	if (i.owner_changed_slot) {
 		sd_bus_slot_unref(i.owner_changed_slot);
 		i.owner_changed_slot = nullptr;
@@ -318,6 +368,10 @@ void GnomeClipboard::close() {
 void GnomeClipboard::read_pipe(int fd, const std::string &mime) {
 	pipes_.read(fd,
 		[this, mime](std::string raw) { note_local_payload(mime, raw); });
+}
+
+void GnomeClipboard::cancel_reads() {
+	pipes_.cancel_reads();
 }
 
 void GnomeClipboard::write_pipe(int fd, std::string payload, uint32_t serial) {
@@ -344,6 +398,9 @@ void GnomeClipboard::set_text(const std::string &utf8) {
 		r = sd_bus_call(i.bus, m, 0, &error, nullptr);
 	}
 	sd_bus_message_unref(m);
+	// Mutter asks for the text (SelectionTransfer) as soon as an app
+	// pastes, possibly while this call waited for its reply.
+	i.process_queued();
 	if (r < 0) {
 		WLOG_ERROR("clipboard: SetSelection failed: %s", sdbus_error_text(error, r));
 		sd_bus_error_free(&error);

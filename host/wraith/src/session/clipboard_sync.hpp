@@ -59,6 +59,10 @@ public:
 	// routine there. `done` never fires after this pool is destroyed.
 	void write(int fd, std::string text, std::function<void(bool ok)> done = {});
 
+	// Drops every read still going: their fds close (the writer sees the
+	// pipe broken) and their `done` never fires. Writes go on.
+	void cancel_reads();
+
 private:
 	struct Transfer;
 	void finish(Transfer *transfer);

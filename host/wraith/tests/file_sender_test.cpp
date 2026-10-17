@@ -134,7 +134,37 @@ public:
 	explicit TestSink(wl_event_loop *loop) : ClipboardSink(loop) {}
 	void set_text(const std::string &) override {}
 	void read(const std::string &mime, const std::string &raw) { note_local_payload(mime, raw); }
+	void read_fd(int fd, std::function<void(std::string)> done) { pipes_.read(fd, std::move(done)); }
+	void cancel_reads() { pipes_.cancel_reads(); }
 };
+
+// A read dropped part way (the owner changed under it): its fd closes, so
+// the writer sees the pipe broken (what mutter checks before refusing a
+// read "in parallel"), and it never reports. The next read is unaffected.
+void test_cancelled_read(wl_event_loop *loop) {
+	TestSink sink(loop);
+	int first[2], second[2];
+	CHECK(pipe(first) == 0 && pipe(second) == 0);
+	int reports = 0;
+	std::string got;
+	sink.read_fd(first[0], [&](std::string) { reports++; });
+	CHECK(write(first[1], "plain", 5) == 5);
+	wl_event_loop_dispatch(loop, 0);
+	sink.cancel_reads();
+	struct pollfd pfd = {first[1], POLLOUT, 0};
+	CHECK(poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLERR));
+	close(first[1]);
+	wl_event_loop_dispatch(loop, 0);
+	CHECK(reports == 0);
+
+	sink.read_fd(second[0], [&](std::string raw) { got = raw; reports++; });
+	CHECK(write(second[1], "copy\nfile:///tmp/x", 18) == 18);
+	close(second[1]);
+	for (int i = 0; i < 10 && reports == 0; i++) {
+		wl_event_loop_dispatch(loop, 10);
+	}
+	CHECK(reports == 1 && got == "copy\nfile:///tmp/x");
+}
 
 void test_clipboard_sink(wl_event_loop *loop) {
 	TestSink sink(loop);
@@ -173,6 +203,7 @@ void test_clipboard_sink(wl_event_loop *loop) {
 int main() {
 	Loop loop;
 	test_clipboard_sink(loop.loop);
+	test_cancelled_read(loop.loop);
 
 	const std::string cert = "/tmp/wraith_file_sender_cert.pem";
 	const std::string key = "/tmp/wraith_file_sender_key.pem";
