@@ -170,15 +170,19 @@ add_executable(gdp_worker_test tests/worker_test.cpp)
 target_link_libraries(gdp_worker_test PRIVATE gdp Threads::Threads)
 add_test(NAME gdp_worker_test COMMAND gdp_worker_test)
 
-add_executable(gdp_file_list_test tests/file_list_test.cpp)
-target_link_libraries(gdp_file_list_test PRIVATE gdp)
-add_test(NAME gdp_file_list_test COMMAND gdp_file_list_test)
+if(NOT WIN32)
+  # POSIX paths and symlinks (/etc/passwd, a name with a newline), which
+  # Windows can't create without Developer Mode.
+  add_executable(gdp_file_list_test tests/file_list_test.cpp)
+  target_link_libraries(gdp_file_list_test PRIVATE gdp)
+  add_test(NAME gdp_file_list_test COMMAND gdp_file_list_test)
 
-# A real FUSE mount, read from another thread; passes (skipped) where FUSE
-# isn't built or /dev/fuse can't be opened.
-add_executable(gdp_remote_mount_test tests/remote_mount_test.cpp)
-target_link_libraries(gdp_remote_mount_test PRIVATE gdp Threads::Threads)
-add_test(NAME gdp_remote_mount_test COMMAND gdp_remote_mount_test)
+  # A real FUSE mount, read from another thread through POSIX file calls;
+  # passes (skipped) where FUSE isn't built or /dev/fuse can't be opened.
+  add_executable(gdp_remote_mount_test tests/remote_mount_test.cpp)
+  target_link_libraries(gdp_remote_mount_test PRIVATE gdp Threads::Threads)
+  add_test(NAME gdp_remote_mount_test COMMAND gdp_remote_mount_test)
+endif()
 
 add_executable(gdp_refine_test tests/refine_test.cpp)
 target_link_libraries(gdp_refine_test PRIVATE gdp)
