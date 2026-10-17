@@ -1,6 +1,8 @@
-nv-codec-headers 12.1.14.0 (https://git.videolan.org/?p=ffmpeg/nv-codec-headers.git),
-copied unmodified from Ubuntu's libffmpeg-nvenc-dev package: the NVENC API
-definitions (nvEncodeAPI.h, NVIDIA, MIT) and FFmpeg's dlopen() loader for
-libcuda/libnvidia-encode (dynlink_*.h, MIT). See COPYING. Vendored so the
-NVENC backend builds without an NVIDIA SDK or driver installed; the driver
-it runs against must support NVENC API 12.1 (R530 or newer).
+nv-codec-headers 12.2.72.0 (https://git.videolan.org/?p=ffmpeg/nv-codec-headers.git,
+tag n12.2.72.0), the include/ffnvcodec headers copied unmodified: the NVENC
+API definitions (nvEncodeAPI.h, NVIDIA, MIT) and FFmpeg's dlopen() loader
+for libcuda/libnvidia-encode (dynlink_*.h, MIT). See COPYING (Ubuntu's
+libffmpeg-nvenc-dev copyright file, from when 12.1 was vendored). Vendored
+so the NVENC backend builds without an NVIDIA SDK or driver installed; the
+driver it runs against must support NVENC API 12.2 (550.54 or newer on
+Linux).

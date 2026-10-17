@@ -24,9 +24,10 @@ struct StatsSample {
 	uint32_t width = 0;
 	uint32_t height = 0;
 	std::string codec;
+	// OutputDescriptor.color in words: "10-bit BT.601 limited 4:2:0".
+	std::string color;
 	std::string encoder; // SessionAccept.encoder ("vaapi+refine" etc.), empty if unreported
 	std::string decoder; // Decoder::backend_name(): "vaapi (hardware)", "ffmpeg (software)"...
-	bool audio = false;
 	double fps = 0.0;        // decoded frames per second over the last window
 	double decode_ms = 0.0;  // mean decode time over the window
 	double present_ms = 0.0; // mean present time over the window

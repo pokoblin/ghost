@@ -32,6 +32,11 @@ struct BackendRow {
 	bool hardware;
 	// Hardware rows also need a render node to even attempt.
 	bool needs_drm_fd;
+	// The most bits per component this row's backend codes
+	// (EncoderConfig::bit_depth): 8 or 10. A row is skipped for a deeper
+	// request rather than asked and refused, so the depth a session can
+	// negotiate is readable off the table (codec_supports_bit_depth()).
+	uint32_t max_bit_depth;
 	std::function<std::unique_ptr<Encoder>()> make;
 };
 
@@ -48,19 +53,24 @@ const std::vector<BackendRow> &backend_table() {
 	static const std::vector<BackendRow> rows = {
 		// h264: the universal floor, and the only codec with a software
 		// row. Every session can fall back here.
-		{gdp::VideoCodec::H264, "vaapi", true, true,
+		// 8-bit only: no hardware decodes H.264 High 10, so no row offers
+		// it (docs/design/encoding.md).
+		{gdp::VideoCodec::H264, "vaapi", true, true, 8,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<VaapiH264Encoder>(); }},
-		{gdp::VideoCodec::H264, "nvenc", true, false,
+		{gdp::VideoCodec::H264, "nvenc", true, false, 8,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<NvencEncoder>(); }},
-		{gdp::VideoCodec::H264, "software", false, false,
+		{gdp::VideoCodec::H264, "software", false, false, 8,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<X264Encoder>(); }},
 
 		// h265: hardware only. There is no software HEVC encoder here, so
 		// on a host without a hardware HEVC encoder no row opens and
 		// accept_session() moves on to the client's next preference.
-		{gdp::VideoCodec::H265, "vaapi", true, true,
+		// Main10 where the GPU has it (a VA-API entrypoint, NVENC's
+		// 10-bit cap); one without falls past to the next row, and the
+		// session then retries at 8.
+		{gdp::VideoCodec::H265, "vaapi", true, true, 10,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<VaapiHevcEncoder>(); }},
-		{gdp::VideoCodec::H265, "nvenc", true, false,
+		{gdp::VideoCodec::H265, "nvenc", true, false, 10,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<NvencEncoder>(); }},
 
 		// av1: hardware only, like h265 -- there is no software AV1
@@ -68,16 +78,18 @@ const std::vector<BackendRow> &backend_table() {
 		// newer silicon than HEVC encode: RDNA3 and up on AMD, Arc on
 		// Intel, Ada on NVIDIA) no row opens and accept_session() moves on
 		// to the client's next preference.
-		{gdp::VideoCodec::AV1, "vaapi", true, true,
+		{gdp::VideoCodec::AV1, "vaapi", true, true, 10,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<VaapiAv1Encoder>(); }},
-		{gdp::VideoCodec::AV1, "nvenc", true, false,
+		{gdp::VideoCodec::AV1, "nvenc", true, false, 10,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<NvencEncoder>(); }},
 
 #ifdef WRAITH_HAVE_PYROWAVE
 		// pyrowave: Vulkan compute on the render node's GPU, no fallback.
 		// Not a VA-API or NVENC row, so hardware_encodable_codecs() never
 		// counts it and it plays no part in picking the GPU.
-		{gdp::VideoCodec::Pyrowave, "pyrowave", true, true,
+		// A float codec: "10-bit" is a precision choice (a 16-bit
+		// intermediate instead of a dithered 8-bit one), so every GPU can.
+		{gdp::VideoCodec::Pyrowave, "pyrowave", true, true, 10,
 			[]() -> std::unique_ptr<Encoder> { return std::make_unique<PyrowaveEncoder>(); }},
 #endif
 	};
@@ -100,6 +112,11 @@ const std::vector<std::string> &supported_video_codecs() {
 		return result;
 	}();
 	return codecs;
+}
+
+bool codec_supports_bit_depth(gdp::VideoCodec codec, uint32_t bit_depth) {
+	return std::any_of(backend_table().begin(), backend_table().end(),
+		[&](const BackendRow &row) { return row.codec == codec && row.max_bit_depth >= bit_depth; });
 }
 
 std::vector<std::string> hardware_encodable_codecs(int drm_fd) {
@@ -173,6 +190,11 @@ EncoderSelection create_encoder(const EncoderConfig &config, bool force_software
 			WLOG_INFO("encoder: skipping %s %s backend (renderer has no DRM fd)", token, row.name);
 			continue;
 		}
+		if (row.max_bit_depth < config.bit_depth) {
+			WLOG_INFO("encoder: skipping %s %s backend (%u-bit only, %u asked)", token, row.name,
+				row.max_bit_depth, config.bit_depth);
+			continue;
+		}
 
 		std::unique_ptr<Encoder> encoder = row.make();
 		if (!encoder) {
@@ -198,15 +220,16 @@ EncoderSelection create_encoder(const EncoderConfig &config, bool force_software
 		if (refine) {
 			selection.backend_name += "+refine";
 		}
-		WLOG_INFO("encoder: opened %ux%u %s (%s)", config.width, config.height, token,
-			selection.backend_name.c_str());
+		WLOG_INFO("encoder: opened %ux%u %u-bit %s (%s)", config.width, config.height, config.bit_depth,
+			token, selection.backend_name.c_str());
 		return selection;
 	}
 
 	if (!any_row) {
 		WLOG_ERROR("encoder: no backend registered for codec \"%s\"", token);
 	} else {
-		WLOG_ERROR("encoder: every backend for codec \"%s\" failed to open", token);
+		WLOG_ERROR("encoder: every backend for codec \"%s\" failed to open at %u bits", token,
+			config.bit_depth);
 	}
 	return selection;
 }

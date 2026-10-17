@@ -50,7 +50,12 @@ std::string describe_encoder(const std::string &encoder) {
 	if (backend == "software") {
 		return "x264 (software)" + suffix;
 	}
-	return encoder;
+	// The PyroWave backend is named after its codec, which the line already
+	// says; what it runs on is the news.
+	if (backend == "pyrowave") {
+		return "vulkan compute" + suffix;
+	}
+	return backend + suffix;
 }
 
 // "net lan" when the profile was forced, "net auto: lan" when wraith
@@ -80,9 +85,8 @@ void build_stats_overlay(UiDrawList &out, const UiFont &font, const StatsSample 
 	std::string encoder = describe_encoder(sample.encoder);
 	const std::string &decoder = sample.decoder;
 	std::vector<std::string> lines = {
-		std::to_string(sample.width) + "x" + std::to_string(sample.height) + " " + sample.codec +
-			(sample.audio ? " + audio" : ""),
-		"encode " + encoder,
+		std::to_string(sample.width) + "x" + std::to_string(sample.height) + " " + sample.color,
+		"encode " + sample.codec + " " + encoder,
 		"decode " + decoder,
 		"fps " + fmt("%.1f", sample.fps) + "   decode " + fmt("%.1f", sample.decode_ms) + " ms   present " +
 			fmt("%.1f", sample.present_ms) + " ms",

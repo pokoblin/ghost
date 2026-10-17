@@ -13,6 +13,7 @@
 #if defined(_WIN32)
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dxgiformat.h>
 #elif defined(__APPLE__)
 #include <VideoToolbox/VideoToolbox.h>
 #else
@@ -56,11 +57,74 @@ CodecSet vulkan_codecs(VkVideoCodecOperationFlagsKHR ops) {
 	return set;
 }
 
+#ifdef SPECTRE_VULKAN_DECODE
+// Which of `ops` the decode queue takes at 10 bits: the Main10 and AV1
+// profiles asked of vkGetPhysicalDeviceVideoCapabilitiesKHR with 10-bit
+// luma and chroma, which is what FFmpeg's Vulkan hwaccel will ask for a
+// 10-bit stream. A profile the driver doesn't do is an error from that
+// query, not a capability bit, so each is a call of its own.
+CodecSet vulkan_ten_bit_codecs(VkInstance instance, VkPhysicalDevice device,
+	VkVideoCodecOperationFlagsKHR ops) {
+	auto get_caps = (PFN_vkGetPhysicalDeviceVideoCapabilitiesKHR)vkGetInstanceProcAddr(instance,
+		"vkGetPhysicalDeviceVideoCapabilitiesKHR");
+	if (!get_caps) {
+		return 0;
+	}
+	CodecSet set = 0;
+	VkVideoProfileInfoKHR profile{};
+	profile.sType = VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR;
+	profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+	profile.lumaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+	profile.chromaBitDepth = VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR;
+
+	if (ops & VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR) {
+		VkVideoDecodeH265ProfileInfoKHR h265{};
+		h265.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_PROFILE_INFO_KHR;
+		h265.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN_10;
+		VkVideoDecodeH265CapabilitiesKHR h265_caps{};
+		h265_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_H265_CAPABILITIES_KHR;
+		VkVideoDecodeCapabilitiesKHR decode_caps{};
+		decode_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR;
+		decode_caps.pNext = &h265_caps;
+		VkVideoCapabilitiesKHR caps{};
+		caps.sType = VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR;
+		caps.pNext = &decode_caps;
+		profile.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_H265_BIT_KHR;
+		profile.pNext = &h265;
+		if (get_caps(device, &profile, &caps) == VK_SUCCESS) {
+			set |= codec_bit(gdp::VideoCodec::H265);
+		}
+	}
+	if (ops & VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR) {
+		VkVideoDecodeAV1ProfileInfoKHR av1{};
+		av1.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_PROFILE_INFO_KHR;
+		av1.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
+		av1.filmGrainSupport = VK_FALSE;
+		VkVideoDecodeAV1CapabilitiesKHR av1_caps{};
+		av1_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_AV1_CAPABILITIES_KHR;
+		VkVideoDecodeCapabilitiesKHR decode_caps{};
+		decode_caps.sType = VK_STRUCTURE_TYPE_VIDEO_DECODE_CAPABILITIES_KHR;
+		decode_caps.pNext = &av1_caps;
+		VkVideoCapabilitiesKHR caps{};
+		caps.sType = VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR;
+		caps.pNext = &decode_caps;
+		profile.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_DECODE_AV1_BIT_KHR;
+		profile.pNext = &av1;
+		if (get_caps(device, &profile, &caps) == VK_SUCCESS) {
+			set |= codec_bit(gdp::VideoCodec::AV1);
+		}
+	}
+	return set;
+}
+#endif
+
 #ifdef _WIN32
 // D3D11VA on the adapter behind `device`, as Decoder::create_native_device()
 // would open it: the decoder profiles FFmpeg's d3d11va hwaccels use, each
-// with the NV12 output they decode to.
-CodecSet native_codecs(VkPhysicalDevice device) {
+// with the NV12 output they decode to -- and, into `ten_bit`, the Main10
+// / AV1 profiles with a P010 output.
+CodecSet native_codecs(VkPhysicalDevice device, CodecSet *ten_bit) {
+	*ten_bit = 0;
 	VkPhysicalDeviceIDProperties id_props{};
 	id_props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
 	VkPhysicalDeviceProperties2 props2{};
@@ -105,11 +169,15 @@ CodecSet native_codecs(VkPhysicalDevice device) {
 	struct Profile {
 		const GUID *guid;
 		gdp::VideoCodec codec;
+		DXGI_FORMAT output;
+		bool ten_bit;
 	};
 	static const Profile kProfiles[] = {
-		{&D3D11_DECODER_PROFILE_H264_VLD_NOFGT, gdp::VideoCodec::H264},
-		{&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, gdp::VideoCodec::H265},
-		{&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, gdp::VideoCodec::AV1},
+		{&D3D11_DECODER_PROFILE_H264_VLD_NOFGT, gdp::VideoCodec::H264, DXGI_FORMAT_NV12, false},
+		{&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, gdp::VideoCodec::H265, DXGI_FORMAT_NV12, false},
+		{&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, gdp::VideoCodec::AV1, DXGI_FORMAT_NV12, false},
+		{&D3D11_DECODER_PROFILE_HEVC_VLD_MAIN10, gdp::VideoCodec::H265, DXGI_FORMAT_P010, true},
+		{&D3D11_DECODER_PROFILE_AV1_VLD_PROFILE0, gdp::VideoCodec::AV1, DXGI_FORMAT_P010, true},
 	};
 	CodecSet set = 0;
 	UINT count = video->GetVideoDecoderProfileCount();
@@ -119,14 +187,21 @@ CodecSet native_codecs(VkPhysicalDevice device) {
 			continue;
 		}
 		for (const Profile &p : kProfiles) {
-			BOOL nv12 = FALSE;
-			if (guid == *p.guid &&
-				SUCCEEDED(video->CheckVideoDecoderFormat(&guid, DXGI_FORMAT_NV12, &nv12)) && nv12) {
-				set |= codec_bit(p.codec);
+			BOOL supported = FALSE;
+			if (guid == *p.guid && SUCCEEDED(video->CheckVideoDecoderFormat(&guid, p.output, &supported)) &&
+				supported) {
+				if (p.ten_bit) {
+					*ten_bit |= codec_bit(p.codec);
+				} else {
+					set |= codec_bit(p.codec);
+				}
 			}
 		}
 	}
 	video->Release();
+	// 10-bit only counts where the 8-bit profile is there too: the offer
+	// lists codecs, and the depth is a refinement of one.
+	*ten_bit &= set;
 	return set;
 }
 #elif defined(__APPLE__)
@@ -135,7 +210,12 @@ CodecSet native_codecs(VkPhysicalDevice device) {
 // without one, so only what the Mac's media engine does counts. (Every Mac
 // decodes H.264 in hardware; HEVC needs a 2015+ Intel GPU or Apple
 // silicon; AV1 an M3 or later.)
-CodecSet native_codecs() {
+//
+// 10 bits: VideoToolbox has no per-profile query. Every Apple silicon
+// media engine decodes HEVC Main10 (and AV1 10-bit where it decodes AV1 at
+// all, M3 and later); Intel Macs' HEVC is Main-only before Kaby Lake and
+// hard to tell apart, so they stay at 8.
+CodecSet native_codecs(CodecSet *ten_bit) {
 	struct Codec {
 		CMVideoCodecType type;
 		gdp::VideoCodec codec;
@@ -147,9 +227,15 @@ CodecSet native_codecs() {
 		{'av01', gdp::VideoCodec::AV1},
 	};
 	CodecSet set = 0;
+	*ten_bit = 0;
 	for (const Codec &c : kCodecs) {
 		if (VTIsHardwareDecodeSupported(c.type)) {
 			set |= codec_bit(c.codec);
+#if defined(__aarch64__)
+			if (c.codec != gdp::VideoCodec::H264) {
+				*ten_bit |= codec_bit(c.codec);
+			}
+#endif
 		}
 	}
 	return set;
@@ -157,7 +243,12 @@ CodecSet native_codecs() {
 #else
 // VA-API on `drm_render_node`, as Decoder::create_native_device() would open
 // it: a VLD (decode) entrypoint on one of the profiles wraith encodes to.
-CodecSet native_codecs(const char *drm_render_node) {
+// Into `ten_bit`: the same at 10 bits -- HEVC's own Main10 profile, and
+// AV1 Profile0 (which covers both depths) when its decoder takes 10-bit
+// 4:2:0 surfaces (VAConfigAttribRTFormat), as FFmpeg's vaapi hwaccel
+// checks before decoding into P010.
+CodecSet native_codecs(const char *drm_render_node, CodecSet *ten_bit) {
+	*ten_bit = 0;
 	int fd = open(drm_render_node, O_RDWR | O_CLOEXEC);
 	if (fd < 0) {
 		return 0;
@@ -170,13 +261,19 @@ CodecSet native_codecs(const char *drm_render_node) {
 		struct Profile {
 			VAProfile profile;
 			gdp::VideoCodec codec;
+			// The surface format the depth needs of this profile's decoder:
+			// 0 for the 8-bit entries (any VLD entrypoint does NV12).
+			unsigned rt_format;
+			bool ten_bit;
 		};
 		static const Profile kProfiles[] = {
-			{VAProfileH264ConstrainedBaseline, gdp::VideoCodec::H264},
-			{VAProfileH264Main, gdp::VideoCodec::H264},
-			{VAProfileH264High, gdp::VideoCodec::H264},
-			{VAProfileHEVCMain, gdp::VideoCodec::H265},
-			{VAProfileAV1Profile0, gdp::VideoCodec::AV1},
+			{VAProfileH264ConstrainedBaseline, gdp::VideoCodec::H264, 0, false},
+			{VAProfileH264Main, gdp::VideoCodec::H264, 0, false},
+			{VAProfileH264High, gdp::VideoCodec::H264, 0, false},
+			{VAProfileHEVCMain, gdp::VideoCodec::H265, 0, false},
+			{VAProfileAV1Profile0, gdp::VideoCodec::AV1, 0, false},
+			{VAProfileHEVCMain10, gdp::VideoCodec::H265, VA_RT_FORMAT_YUV420_10, true},
+			{VAProfileAV1Profile0, gdp::VideoCodec::AV1, VA_RT_FORMAT_YUV420_10, true},
 		};
 		int profile_count = vaMaxNumProfiles(display);
 		std::vector<VAProfile> profiles((size_t)profile_count);
@@ -192,10 +289,26 @@ CodecSet native_codecs(const char *drm_render_node) {
 						VA_STATUS_SUCCESS) {
 						continue;
 					}
+					bool vld = false;
 					for (int e = 0; e < entrypoint_count; e++) {
-						if (entrypoints[e] == VAEntrypointVLD) {
-							set |= codec_bit(p.codec);
+						vld = vld || entrypoints[e] == VAEntrypointVLD;
+					}
+					if (!vld) {
+						continue;
+					}
+					if (p.rt_format != 0) {
+						VAConfigAttrib attrib{};
+						attrib.type = VAConfigAttribRTFormat;
+						if (vaGetConfigAttributes(display, p.profile, VAEntrypointVLD, &attrib, 1) !=
+								VA_STATUS_SUCCESS ||
+							attrib.value == VA_ATTRIB_NOT_SUPPORTED || !(attrib.value & p.rt_format)) {
+							continue;
 						}
+					}
+					if (p.ten_bit) {
+						*ten_bit |= codec_bit(p.codec);
+					} else {
+						set |= codec_bit(p.codec);
 					}
 				}
 			}
@@ -203,17 +316,21 @@ CodecSet native_codecs(const char *drm_render_node) {
 		vaTerminate(display);
 	}
 	close(fd);
+	*ten_bit &= set;
 	return set;
 }
 #endif
 
 // The hardware half: what Vulkan Video and the platform decoder can each
-// take on the GPU the presenter will land on. Mirrors the gates
+// take on the GPU the presenter will land on, at 8 bits and (`ten_bit`,
+// the union over the paths) at 10. Mirrors the gates
 // StreamSession::open_window() and Decoder::open() apply to the real thing.
-void probe_hardware(const char *drm_render_node, CodecSet *vulkan, CodecSet *native, CodecSet *compute) {
+void probe_hardware(const char *drm_render_node, CodecSet *vulkan, CodecSet *native, CodecSet *compute,
+	CodecSet *ten_bit) {
 	*vulkan = 0;
 	*native = 0;
 	*compute = 0;
+	*ten_bit = 0;
 
 	VkApplicationInfo app_info{};
 	app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -238,9 +355,13 @@ void probe_hardware(const char *drm_render_node, CodecSet *vulkan, CodecSet *nat
 	if (device) {
 #ifdef SPECTRE_HAVE_PYROWAVE
 		// PyroWave's compute decode (pyrowave_decode.hpp), whose gate
-		// VulkanDevice::create_device() applies too.
+		// VulkanDevice::create_device() applies too. 10 bits is a 16-bit
+		// plane format the GPU has to sample and write.
 		if (VulkanDevice::supports_pyrowave(device)) {
 			*compute = codec_bit(gdp::VideoCodec::Pyrowave);
+			if (VulkanDevice::supports_pyrowave(device, nullptr, true)) {
+				*ten_bit |= codec_bit(gdp::VideoCodec::Pyrowave);
+			}
 		}
 #endif
 #ifdef SPECTRE_VULKAN_DECODE
@@ -249,22 +370,25 @@ void probe_hardware(const char *drm_render_node, CodecSet *vulkan, CodecSet *nat
 		std::vector<const char *> extensions;
 		if (VulkanDevice::probe_video_decode(device, &decode_family, &decode_ops, &extensions)) {
 			*vulkan = vulkan_codecs(decode_ops);
+			*ten_bit |= vulkan_ten_bit_codecs(instance, device, decode_ops);
 		}
 #endif
 		if (VulkanDevice::can_import_native_frames(device, matched_render_node)) {
+			CodecSet native_ten_bit = 0;
 #if defined(_WIN32)
-			*native = native_codecs(device);
+			*native = native_codecs(device, &native_ten_bit);
 #elif defined(__APPLE__)
-			*native = native_codecs();
+			*native = native_codecs(&native_ten_bit);
 #else
 			// NVIDIA has no VA-API of its own (see open_window()).
 			VkPhysicalDeviceProperties props{};
 			vkGetPhysicalDeviceProperties(device, &props);
 			constexpr uint32_t kNvidiaVendorId = 0x10de;
 			if (props.vendorID != kNvidiaVendorId) {
-				*native = native_codecs(drm_render_node);
+				*native = native_codecs(drm_render_node, &native_ten_bit);
 			}
 #endif
+			*ten_bit |= native_ten_bit;
 		}
 	}
 	vkDestroyInstance(instance, nullptr);
@@ -328,7 +452,8 @@ std::vector<std::string> probe_decode_paths(const char *drm_render_node) {
 	CodecSet vulkan = 0;
 	CodecSet native = 0;
 	CodecSet compute = 0;
-	probe_hardware(drm_render_node, &vulkan, &native, &compute);
+	CodecSet ten_bit = 0;
+	probe_hardware(drm_render_node, &vulkan, &native, &compute, &ten_bit);
 	std::vector<std::string> result;
 	for (const std::string &token : gdp::all_video_codec_tokens()) {
 		if (!Decoder::can_decode(token)) {
@@ -354,15 +479,16 @@ std::vector<std::string> probe_decode_paths(const char *drm_render_node) {
 	return result;
 }
 
-std::vector<std::string> probe_decodable_codecs(DecodeBackend backend, const char *drm_render_node) {
+DecodableCodecs probe_decodable_codecs(DecodeBackend backend, const char *drm_render_node) {
 	CodecSet vulkan = 0;
 	CodecSet native = 0;
 	CodecSet compute = 0;
+	CodecSet ten_bit = 0;
 	if (backend != DecodeBackend::Software) {
-		probe_hardware(drm_render_node, &vulkan, &native, &compute);
+		probe_hardware(drm_render_node, &vulkan, &native, &compute, &ten_bit);
 	}
 
-	std::vector<std::string> result;
+	DecodableCodecs result;
 	for (const std::string &token : gdp::all_video_codec_tokens()) {
 		// Every path decodes through FFmpeg's decoder for the codec, the
 		// hardware ones included (as its hwaccel) -- except pyrowave, which
@@ -378,11 +504,16 @@ std::vector<std::string> probe_decodable_codecs(DecodeBackend backend, const cha
 		bool on_native = (native & bit) != 0;
 		bool on_compute = (compute & bit) != 0;
 		bool on_v4l2 = backend != DecodeBackend::Software && v4l2_m2m_decodes(codec);
-		SLOG_DEBUG("codec_support: %s -- software %s, vulkan %s, %s %s, compute %s, v4l2 %s", token.c_str(),
-			software ? "yes" : "no", on_vulkan ? "yes" : "no", kNativeDecodeName, on_native ? "yes" : "no",
-			on_compute ? "yes" : "no", on_v4l2 ? "yes" : "no");
+		bool on_ten_bit = (ten_bit & bit) != 0;
+		SLOG_DEBUG("codec_support: %s -- software %s, vulkan %s, %s %s, compute %s, v4l2 %s, 10-bit %s",
+			token.c_str(), software ? "yes" : "no", on_vulkan ? "yes" : "no", kNativeDecodeName,
+			on_native ? "yes" : "no", on_compute ? "yes" : "no", on_v4l2 ? "yes" : "no",
+			on_ten_bit ? "yes" : "no");
 		if (software || on_vulkan || on_native || on_compute || on_v4l2) {
-			result.push_back(token);
+			result.codecs.push_back(token);
+			if (on_ten_bit) {
+				result.ten_bit.push_back(token);
+			}
 		}
 	}
 	return result;

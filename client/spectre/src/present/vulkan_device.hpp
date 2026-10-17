@@ -191,13 +191,17 @@ public:
 	// synchronization2) and sample its 3-plane 4:2:0 output, and is a real
 	// GPU: lavapipe has the features but decodes wrongly.
 	// `why`, if given, is set to the first check that failed (a string
-	// literal) when this returns false.
-	static bool supports_pyrowave(VkPhysicalDevice device, const char **why = nullptr);
+	// literal) when this returns false. `sixteen_bit` asks about the
+	// 16-bit plane formats a 10-bit session decodes into
+	// (G16_B16_R16_3PLANE_420 / R16) instead of the 8-bit ones; the shader
+	// features are the same.
+	static bool supports_pyrowave(VkPhysicalDevice device, const char **why = nullptr,
+		bool sixteen_bit = false);
 	// Whether PyroWave can write the decoded frame's three planes in place,
-	// through R8 storage views of the planar image. Where it can't (Intel's
-	// ANV), PyrowaveDecode decodes into plain R8 images and copies them in
-	// -- supports_pyrowave() accepts those devices too.
-	static bool pyrowave_writes_planes_directly(VkPhysicalDevice device);
+	// through R8 (R16) storage views of the planar `image_format`. Where it
+	// can't (Intel's ANV), PyrowaveDecode decodes into plain R8/R16 images
+	// and copies them in -- supports_pyrowave() accepts those devices too.
+	static bool pyrowave_writes_planes_directly(VkPhysicalDevice device, VkFormat image_format);
 
 	VkSwapchainKHR swapchain() const { return swapchain_; }
 	VkFormat swapchain_format() const { return swapchain_format_; }

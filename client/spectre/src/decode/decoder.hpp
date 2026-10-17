@@ -100,6 +100,10 @@ struct HardwareDecode {
 	// can't run it (VulkanPresenter::compute_device()). The only way
 	// "pyrowave" decodes -- there is no software or other fallback.
 	const VulkanDecodeDevice *compute = nullptr;
+	// OutputDescriptor.color.bit_depth (gdp-spec.md §7.3): 8 or 10. Only
+	// PyroWave's decode reads it (it picks 8- or 16-bit planes to decode
+	// into); FFmpeg's decoders learn the depth from the stream itself.
+	uint32_t bit_depth = 8;
 };
 
 class Decoder {

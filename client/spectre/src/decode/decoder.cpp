@@ -441,7 +441,7 @@ bool Decoder::open(const std::string &codec_name, bool refine, const HardwareDec
 			return false;
 		}
 		pyrowave_ = std::make_unique<PyrowaveDecode>();
-		if (!pyrowave_->open(*hw.compute)) {
+		if (!pyrowave_->open(*hw.compute, hw.bit_depth)) {
 			pyrowave_.reset();
 			return false;
 		}

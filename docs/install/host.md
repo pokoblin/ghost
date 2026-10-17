@@ -98,6 +98,9 @@ session you already hold an unused redirect token and fingerprint for.
   host with a GPU. ghostd doesn't manage this
   ([ADR 0012](../adr/0012-host-setup-stays-with-the-admin.md)), so set it
   up wherever the accounts come from.
+- **NVIDIA.** NVENC needs driver 550.54 or newer (NVENC API 12.2). With
+  an older driver wraith logs that and the NVENC rows don't open: H.264
+  falls back to x264, and PyroWave (Vulkan) still runs on the GPU.
 - **Users.** Logins are checked by the host's PAM (`/etc/pam.d/ghostd`),
   so any account PAM accepts can log in, subject to `[auth]` in
   `ghostd.toml`. root and empty passwords are refused by default.

@@ -60,7 +60,7 @@ std::vector<uint8_t> build_temporal_delimiter() {
 
 std::vector<uint8_t> build_sequence_header(const SeqParams &p) {
 	BitWriter bw;
-	bw.put_bits(0, 3);  // seq_profile = 0: 4:2:0, 8/10-bit
+	bw.put_bits(0, 3);  // seq_profile = 0: 4:2:0, 8- or 10-bit (high_bitdepth below)
 	bw.put_bit(0);      // still_picture
 	bw.put_bit(0);      // reduced_still_picture_header
 	bw.put_bit(0);      // timing_info_present_flag
@@ -107,9 +107,9 @@ std::vector<uint8_t> build_sequence_header(const SeqParams &p) {
 	bw.put_bit(0); // enable_restoration
 
 	// color_config()
-	bw.put_bit(0); // high_bitdepth: 8-bit
-	bw.put_bit(0); // mono_chrome
-	bw.put_bit(1); // color_description_present_flag
+	bw.put_bit(p.high_bitdepth ? 1 : 0); // high_bitdepth: 10-bit samples
+	bw.put_bit(0);                       // mono_chrome
+	bw.put_bit(1);                       // color_description_present_flag
 	bw.put_bits(p.color_primaries, 8);
 	bw.put_bits(p.transfer_characteristics, 8);
 	bw.put_bits(p.matrix_coefficients, 8);

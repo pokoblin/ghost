@@ -40,9 +40,19 @@ struct EncoderSelection {
 // skips every hardware row (wraith -F). `refine` wraps whichever backend
 // opened in the lossless refinement decorator (encode/refine/
 // refine_encoder.hpp) -- the session negotiated the "refine" capability;
-// the base selection is identical either way. Returns an empty selection,
-// having logged why, if no row for the codec opened.
+// the base selection is identical either way. Rows that can't code
+// `config.bit_depth` are skipped (h264 and x264 are 8-bit only), and a
+// row that can may still fail to open at it (no Main10 entrypoint on this
+// GPU), so a caller asking for 10 bits retries at 8 when nothing opened.
+// Returns an empty selection, having logged why, if no row for the codec
+// opened.
 EncoderSelection create_encoder(const EncoderConfig &config, bool force_software, bool refine);
+
+// Whether any registered backend for `codec` codes `bit_depth` bits per
+// component -- a table lookup, no hardware probe: the depths gdp-spec.md
+// §7.3's negotiation may even ask a session for. 8 for every codec; 10
+// for h265 and av1 (VA-API) and pyrowave (any Vulkan GPU).
+bool codec_supports_bit_depth(gdp::VideoCodec codec, uint32_t bit_depth);
 
 // The codecs to advertise in negotiation, in the preference order
 // gdp::all_video_codec_tokens() defines, filtered down to those with a

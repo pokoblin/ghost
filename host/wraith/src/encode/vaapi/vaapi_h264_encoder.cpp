@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "encode/vaapi/vaapi_h264_encoder.hpp"
+#include "encode/colour_description.hpp"
 #include "encode/vaapi/h264_bitstream.hpp"
 
 #include "util/log.hpp"
@@ -70,6 +71,10 @@ bool VaapiH264Encoder::init_codec() {
 	sps_params.height_mb = height_mb_;
 	sps_params.level_idc = level_idc_;
 	sps_params.log2_max_frame_num_minus4 = log2_max_frame_num_minus4_;
+	ColourDescription colour = colour_description(config_.matrix);
+	sps_params.colour_primaries = colour.primaries;
+	sps_params.transfer_characteristics = colour.transfer;
+	sps_params.matrix_coefficients = colour.matrix;
 	sps_nal_ = h264::wrap_nal(3, 7, h264::escape_emulation(h264::build_sps(sps_params)));
 	pps_nal_ = h264::wrap_nal(3, 8, h264::escape_emulation(h264::build_pps()));
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "encode/vaapi/vaapi_hevc_encoder.hpp"
+#include "encode/colour_description.hpp"
 #include "encode/vaapi/hevc_bitstream.hpp"
 
 #include "util/log.hpp"
@@ -55,7 +56,7 @@ uint8_t pick_level_idc(uint64_t luma_samples, uint32_t fps_num, uint32_t fps_den
 } // namespace
 
 VAProfile VaapiHevcEncoder::enc_profile() const {
-	return VAProfileHEVCMain;
+	return bit_depth() == 10 ? VAProfileHEVCMain10 : VAProfileHEVCMain;
 }
 
 // HEVC hardware is much less uniform than H.264's fixed 16x16 macroblock:
@@ -169,6 +170,7 @@ bool VaapiHevcEncoder::init_codec() {
 	max_poc_lsb_ = 1u << (log2_max_poc_lsb_minus4_ + 4);
 
 	hevc::SpsParams sps_params{};
+	sps_params.bit_depth = (uint8_t)bit_depth();
 	sps_params.width_px = config_.width;
 	sps_params.height_px = config_.height;
 	sps_params.coded_width = padded_width_;
@@ -190,8 +192,13 @@ bool VaapiHevcEncoder::init_codec() {
 	// H.264 backend makes the same trade (no direct_8x8 temporal mode).
 	sps_params.temporal_mvp_enabled = false;
 	sps_params.strong_intra_smoothing_enabled = strong_intra_smoothing_enabled_;
+	ColourDescription colour = colour_description(config_.matrix);
+	sps_params.colour_primaries = colour.primaries;
+	sps_params.transfer_characteristics = colour.transfer;
+	sps_params.matrix_coefficients = colour.matrix;
 
-	vps_nal_ = hevc::wrap_nal(hevc::kNalVps, hevc::escape_emulation(hevc::build_vps(level_idc_)));
+	vps_nal_ = hevc::wrap_nal(hevc::kNalVps,
+		hevc::escape_emulation(hevc::build_vps(level_idc_, (uint8_t)bit_depth())));
 	sps_nal_ = hevc::wrap_nal(hevc::kNalSps, hevc::escape_emulation(hevc::build_sps(sps_params)));
 	pps_nal_ = hevc::wrap_nal(hevc::kNalPps, hevc::escape_emulation(hevc::build_pps(log2_diff_max_min_cb_)));
 
@@ -210,7 +217,7 @@ bool VaapiHevcEncoder::submit_frame(VASurfaceID surface, int64_t pts_us) {
 
 	if (is_idr) {
 		VAEncSequenceParameterBufferHEVC seq = {};
-		seq.general_profile_idc = 1; // Main
+		seq.general_profile_idc = hevc::profile_idc_for_bit_depth((uint8_t)bit_depth()); // Main / Main10
 		seq.general_level_idc = level_idc_;
 		seq.general_tier_flag = 0;
 		seq.intra_period = idr_period_hint();
@@ -220,8 +227,8 @@ bool VaapiHevcEncoder::submit_frame(VASurfaceID surface, int64_t pts_us) {
 		seq.pic_width_in_luma_samples = (uint16_t)padded_width_;
 		seq.pic_height_in_luma_samples = (uint16_t)padded_height_;
 		seq.seq_fields.bits.chroma_format_idc = 1; // 4:2:0
-		seq.seq_fields.bits.bit_depth_luma_minus8 = 0;
-		seq.seq_fields.bits.bit_depth_chroma_minus8 = 0;
+		seq.seq_fields.bits.bit_depth_luma_minus8 = bit_depth() - 8;
+		seq.seq_fields.bits.bit_depth_chroma_minus8 = bit_depth() - 8;
 		seq.seq_fields.bits.scaling_list_enabled_flag = 0;
 		seq.seq_fields.bits.strong_intra_smoothing_enabled_flag = strong_intra_smoothing_enabled_;
 		seq.seq_fields.bits.amp_enabled_flag = amp_enabled_;
@@ -238,7 +245,10 @@ bool VaapiHevcEncoder::submit_frame(VASurfaceID surface, int64_t pts_us) {
 		seq.log2_diff_max_min_transform_block_size = log2_diff_max_min_tb_;
 		seq.max_transform_hierarchy_depth_inter = max_transform_hierarchy_depth_inter_;
 		seq.max_transform_hierarchy_depth_intra = max_transform_hierarchy_depth_intra_;
-		seq.vui_parameters_present_flag = 0;
+		// The packed SPS carries the VUI (its colour description); the
+		// structured buffer has no colour fields, and says only that the
+		// VUI is there. Everything it does have stays off, as in the SPS.
+		seq.vui_parameters_present_flag = 1;
 		if (!add_buffer(buffers, VAEncSequenceParameterBufferType, sizeof(seq), &seq)) {
 			return false;
 		}

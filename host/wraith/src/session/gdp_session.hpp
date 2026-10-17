@@ -11,11 +11,14 @@
 // a predicate so this class doesn't need to know which mode produced it.
 #pragma once
 
+#include "encode/encoder.hpp" // ColorMatrix
 #include "gdp/clipboard.hpp"
 #include "gdp/clock.hpp"
+#include "gdp/negotiation.hpp"
 #include "gdp/framing.hpp"
 #include "gdp/gamepad.hpp"
 #include "gdp/transport.hpp"
+#include "session/file_receiver.hpp"
 #include "session/gamepad_devices.hpp"
 #include "session/raw_controllers.hpp"
 #include "session/path_rate_estimator.hpp"
@@ -217,6 +220,15 @@ private:
 	// capability negotiation, then SessionAccept. Returns false (having
 	// closed the connection) if there's no usable codec.
 	bool accept_session(const gdp::session::SessionHello &hello);
+	// Opens the encoder for `codec` at the deepest bit depth the viewer
+	// declared (codec_formats_), wraith.toml allows and a backend opens at
+	// -- 10, then 8 (gdp-spec.md §7.3). False if none opened at any depth.
+	bool open_session_encoder(const std::string &codec, bool refine);
+	// The matrix a session on `codec` is coded with: BT.709 when the client
+	// negotiated "color" (gdp-spec.md §7.3), else the codec's default --
+	// BT.601 for the block codecs. PyroWave converts with its own BT.709
+	// either way, and its default says so.
+	ColorMatrix session_matrix(const std::string &codec) const;
 	// Sends `env` on the control stream, logging (never silently dropping)
 	// an encode failure -- which can't happen for our own messages.
 	void send_control(const gdp::session::ControlEnvelope &env);
@@ -238,6 +250,9 @@ private:
 	// An incoming ClipboardData: validates mime/size, then applies it to
 	// the local clipboard. Dropped, never forwarded, if anything is off.
 	void handle_clipboard_data(const gdp::session::ClipboardData &clipboard);
+	// From accept_session(), once "file" is in effect (gdp-spec.md §7.12):
+	// grants the client its file streams and hands each one to files_.
+	void start_file_receiver();
 
 	// The three gamepad input messages (gdp-spec.md §8.5).
 	// Each is a no-op unless the session negotiated "gamepad"; a client
@@ -307,6 +322,10 @@ private:
 	bool authenticated_ = false;
 	std::string video_codec_;
 	std::vector<std::string> capabilities_;
+	// SessionHello.codec_formats (gdp-spec.md §7.3): the depths the viewer
+	// decodes beyond 8 bits, per codec. Kept for the reopen on a
+	// resolution change, which renegotiates the depth the same way.
+	std::vector<gdp::CodecFormat> codec_formats_;
 	// How the last SessionHello was answered, for status_text(): kept past
 	// the session, since a negotiation that failed is what a report is for.
 	std::string negotiation_summary_;
@@ -320,6 +339,14 @@ private:
 	// attaches seconds before the captured compositor is up). Applied when
 	// the sink appears; dropped with the session otherwise.
 	std::string pending_clipboard_text_;
+	// Where received files go, settled before SessionAccept (empty: the
+	// "file" capability isn't offered), and the session's receiver once it
+	// is in effect. files_close_ closes the connection for a client that
+	// broke the file stream's protocol, from outside the stream callback
+	// that found out.
+	std::string file_directory_;
+	std::unique_ptr<FileReceiver> files_;
+	IdleCoalescer files_close_;
 	// The client's forwarded controllers, or null on a host that can't
 	// create them. Per-client, like the clipboard echo state: every slot
 	// is disconnected in reset_session(), so a client going away unplugs

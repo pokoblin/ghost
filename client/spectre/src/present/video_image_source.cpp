@@ -72,10 +72,13 @@ namespace spectre {
 namespace {
 
 constexpr VkFormat kNv12Format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+constexpr VkFormat kP010Format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
+constexpr VkFormat kI420Format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+constexpr VkFormat kI420x16Format = VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM;
 
-// The image format this platform's native hardware path and the software
-// fallback land on. See the header for why Windows can't use the planar
-// one; Vulkan Video decode is NV12 everywhere.
+// The image format this platform's software fallback lands on (8-bit:
+// software decode never declares more). See the header for why Windows
+// can't use the planar one.
 #ifdef _WIN32
 constexpr VkFormat kVideoFormat = VK_FORMAT_B8G8R8A8_UNORM;
 constexpr VideoFormat kNativeFormat = VideoFormat::Bgra;
@@ -84,9 +87,26 @@ constexpr VkFormat kVideoFormat = kNv12Format;
 constexpr VideoFormat kNativeFormat = VideoFormat::Nv12;
 #endif
 
+VkSamplerYcbcrModelConversion ycbcr_model(ColorMatrix matrix) {
+	switch (matrix) {
+	case ColorMatrix::Bt601: return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
+	case ColorMatrix::Bt709: return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
+	case ColorMatrix::Bt2020Ncl: return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020;
+	}
+	return VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
+}
+
+VkSamplerYcbcrRange ycbcr_range(ColorRange range) {
+	return range == ColorRange::Full ? VK_SAMPLER_YCBCR_RANGE_ITU_FULL : VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+}
+
 } // namespace
 
 VideoImageSource::~VideoImageSource() {
+	shutdown();
+}
+
+void VideoImageSource::shutdown() {
 	if (!dev_) {
 		return;
 	}
@@ -97,76 +117,108 @@ VideoImageSource::~VideoImageSource() {
 	destroy_imported(&imported_);
 #endif
 	destroy_software_image();
-	for (VkSampler sampler : sampler_) {
+	destroy_samplers();
+	current_view_ = VK_NULL_HANDLE;
+	current_source_ = Source::None;
+	dev_ = nullptr;
+}
+
+void VideoImageSource::destroy_samplers() {
+	for (VkSampler &sampler : sampler_) {
 		if (sampler) vkDestroySampler(dev_->device(), sampler, nullptr);
+		sampler = VK_NULL_HANDLE;
 	}
 	if (ycbcr_conversion_) vkDestroySamplerYcbcrConversion(dev_->device(), ycbcr_conversion_, nullptr);
 	if (i420_conversion_) vkDestroySamplerYcbcrConversion(dev_->device(), i420_conversion_, nullptr);
+	ycbcr_conversion_ = VK_NULL_HANDLE;
+	i420_conversion_ = VK_NULL_HANDLE;
+	for (uint32_t &count : descriptor_count_) {
+		count = 1;
+	}
 }
 
-bool VideoImageSource::init(VulkanDevice &device) {
+VkFormat VideoImageSource::two_plane_format() const {
+	return color_.bit_depth > 8 ? kP010Format : kNv12Format;
+}
+
+VkFormat VideoImageSource::three_plane_format() const {
+	return color_.bit_depth > 8 ? kI420x16Format : kI420Format;
+}
+
+bool VideoImageSource::init(VulkanDevice &device, const VideoColor &color) {
 	dev_ = &device;
-	// Only PyroWave decodes to I420; without it the format just isn't
-	// offered (VulkanPresenter::compute_device() then says no).
-	if (dev_->compute_device() && !create_i420_sampler()) {
-		SLOG_INFO("video_image_source: no I420 sampler -- PyroWave decode unavailable");
+	color_ = color;
+	if (color_.bit_depth != 8 && color_.bit_depth != 10) {
+		SLOG_ERROR("video_image_source: %u-bit video isn't a depth this client presents", color_.bit_depth);
+		return false;
+	}
+	// Only PyroWave decodes to 3-plane images; without it the format just
+	// isn't offered (VulkanPresenter::compute_device() then says no).
+	if (dev_->compute_device() &&
+		!create_ycbcr_sampler(three_plane_slot(), three_plane_format(), VK_CHROMA_LOCATION_MIDPOINT,
+			&i420_conversion_, "video sampler (3-plane)")) {
+		SLOG_INFO("video_image_source: no 3-plane sampler -- PyroWave decode unavailable");
 	}
 
+	// The codecs' default chroma sample location doesn't map exactly onto
+	// Vulkan's two-value-per-axis siting model; cosited-even on both axes
+	// is a common close-enough default (sub-pixel chroma shift at worst,
+	// not a correctness bug). PyroWave's chroma is centre-sited.
 #ifdef _WIN32
-	// Plain BGRA sampler: both native Windows paths hand over RGB already
+	// Plain RGB sampler: both native Windows paths hand over RGB already
 	// (the hardware one converted by ID3D11VideoProcessor, the software one
 	// on the CPU), so there is nothing for a ycbcr conversion to do, and a
 	// single-plane format never needs more than one descriptor slot.
 	if (!dev_->create_sampler(VK_FILTER_LINEAR, nullptr, &sampler_[(int)VideoFormat::Bgra],
-			"video sampler (BGRA)")) {
+			"video sampler (RGB)")) {
 		return false;
 	}
-	// NV12 is only for Vulkan Video decode here, so a device that can't do
-	// the conversion still presents everything else -- VulkanPresenter just
-	// doesn't offer Decoder that backend.
-	if (!create_nv12_sampler()) {
-		SLOG_INFO("video_image_source: no NV12 sampler -- Vulkan Video decode unavailable");
+	// NV12/P010 is only for Vulkan Video decode here, so a device that
+	// can't do the conversion still presents everything else --
+	// VulkanPresenter just doesn't offer Decoder that backend.
+	if (!create_ycbcr_sampler(two_plane_slot(), two_plane_format(), VK_CHROMA_LOCATION_COSITED_EVEN,
+			&ycbcr_conversion_, "video sampler (2-plane)")) {
+		SLOG_INFO("video_image_source: no 2-plane sampler -- Vulkan Video decode unavailable");
 	}
 	return true;
 #else
-	return create_nv12_sampler();
+	return create_ycbcr_sampler(two_plane_slot(), two_plane_format(), VK_CHROMA_LOCATION_COSITED_EVEN,
+		&ycbcr_conversion_, "video sampler (2-plane)");
 #endif
 }
 
-bool VideoImageSource::create_nv12_sampler() {
+bool VideoImageSource::create_ycbcr_sampler(VideoFormat slot, VkFormat format,
+	VkChromaLocation chroma_location, VkSamplerYcbcrConversion *conversion, const char *what) {
 	VkSamplerYcbcrConversionCreateInfo conv_info{};
 	conv_info.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO;
-	conv_info.format = kNv12Format;
-	// BT.601, studio range (16-235): what every wraith encoder but PyroWave
-	// (VA-API, NVENC, x264) produces -- none of them signal full range.
-	// PyroWave's I420 has a sampler of its own (create_i420_sampler()). The
-	// Windows path's VideoProcessorSetStreamColorSpace matches this.
-	conv_info.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_601;
-	conv_info.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+	conv_info.format = format;
+	// The matrix and range the host said it converted with
+	// (OutputDescriptor.color, gdp-spec.md §7.3): studio range from the
+	// VA-API, NVENC and x264 encoders, BT.601 unless the session
+	// negotiated "color", full-range BT.709 from PyroWave. Taken from the
+	// descriptor, not the bitstream: the descriptor is the protocol's word.
+	// A limited range scales with the depth, so P010 needs nothing more.
+	// The Windows path's VideoProcessorSetStreamColorSpace is set from the
+	// same VideoColor.
+	conv_info.ycbcrModel = ycbcr_model(color_.matrix);
+	conv_info.ycbcrRange = ycbcr_range(color_.range);
 	conv_info.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 		VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-	// Approximation: the codecs' default chroma sample location doesn't map
-	// exactly onto Vulkan's two-value-per-axis siting model; cosited-even on
-	// both axes is a common close-enough default (sub-pixel chroma shift at
-	// worst, not a correctness bug).
-	conv_info.xChromaOffset = VK_CHROMA_LOCATION_COSITED_EVEN;
-	conv_info.yChromaOffset = VK_CHROMA_LOCATION_COSITED_EVEN;
+	conv_info.xChromaOffset = chroma_location;
+	conv_info.yChromaOffset = chroma_location;
 	conv_info.chromaFilter = VK_FILTER_LINEAR;
 	conv_info.forceExplicitReconstruction = VK_FALSE;
-
-	if (!vk_check(vkCreateSamplerYcbcrConversion(dev_->device(), &conv_info, nullptr, &ycbcr_conversion_),
+	if (!vk_check(vkCreateSamplerYcbcrConversion(dev_->device(), &conv_info, nullptr, conversion),
 			"vkCreateSamplerYcbcrConversion")) {
-		ycbcr_conversion_ = VK_NULL_HANDLE;
+		*conversion = VK_NULL_HANDLE;
 		return false;
 	}
 
 	VkSamplerYcbcrConversionInfo conv_ref{};
 	conv_ref.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
-	conv_ref.conversion = ycbcr_conversion_;
-
-	if (!dev_->create_sampler(VK_FILTER_LINEAR, &conv_ref, &sampler_[(int)VideoFormat::Nv12],
-			"video sampler (NV12)")) {
-		sampler_[(int)VideoFormat::Nv12] = VK_NULL_HANDLE;
+	conv_ref.conversion = *conversion;
+	if (!dev_->create_sampler(VK_FILTER_LINEAR, &conv_ref, &sampler_[(int)slot], what)) {
+		sampler_[(int)slot] = VK_NULL_HANDLE;
 		return false;
 	}
 
@@ -176,56 +228,7 @@ bool VideoImageSource::create_nv12_sampler() {
 	// fails allocation with VK_ERROR_OUT_OF_POOL_MEMORY.
 	VkPhysicalDeviceImageFormatInfo2 format_info{};
 	format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
-	format_info.format = kNv12Format;
-	format_info.type = VK_IMAGE_TYPE_2D;
-	format_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-	format_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-
-	VkSamplerYcbcrConversionImageFormatProperties ycbcr_format_props{};
-	ycbcr_format_props.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES;
-
-	VkImageFormatProperties2 format_props{};
-	format_props.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
-	format_props.pNext = &ycbcr_format_props;
-
-	if (vkGetPhysicalDeviceImageFormatProperties2(dev_->physical_device(), &format_info, &format_props) ==
-		VK_SUCCESS) {
-		descriptor_count_[(int)VideoFormat::Nv12] =
-			std::max(1u, ycbcr_format_props.combinedImageSamplerDescriptorCount);
-	}
-	return true;
-}
-
-bool VideoImageSource::create_i420_sampler() {
-	VkSamplerYcbcrConversionCreateInfo conv_info{};
-	conv_info.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO;
-	conv_info.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
-	// What wraith's PyroWave encode produces: full-range BT.709 with
-	// centre-sited chroma (pyrowave_encoder.hpp).
-	conv_info.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
-	conv_info.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
-	conv_info.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-		VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
-	conv_info.xChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
-	conv_info.yChromaOffset = VK_CHROMA_LOCATION_MIDPOINT;
-	conv_info.chromaFilter = VK_FILTER_LINEAR;
-	if (!vk_check(vkCreateSamplerYcbcrConversion(dev_->device(), &conv_info, nullptr, &i420_conversion_),
-			"vkCreateSamplerYcbcrConversion(I420)")) {
-		i420_conversion_ = VK_NULL_HANDLE;
-		return false;
-	}
-	VkSamplerYcbcrConversionInfo conv_ref{};
-	conv_ref.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
-	conv_ref.conversion = i420_conversion_;
-	if (!dev_->create_sampler(VK_FILTER_LINEAR, &conv_ref, &sampler_[(int)VideoFormat::I420],
-			"video sampler (I420)")) {
-		sampler_[(int)VideoFormat::I420] = VK_NULL_HANDLE;
-		return false;
-	}
-
-	VkPhysicalDeviceImageFormatInfo2 format_info{};
-	format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
-	format_info.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+	format_info.format = format;
 	format_info.type = VK_IMAGE_TYPE_2D;
 	format_info.tiling = VK_IMAGE_TILING_OPTIMAL;
 	format_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -236,8 +239,7 @@ bool VideoImageSource::create_i420_sampler() {
 	format_props.pNext = &ycbcr_format_props;
 	if (vkGetPhysicalDeviceImageFormatProperties2(dev_->physical_device(), &format_info, &format_props) ==
 		VK_SUCCESS) {
-		descriptor_count_[(int)VideoFormat::I420] =
-			std::max(1u, ycbcr_format_props.combinedImageSamplerDescriptorCount);
+		descriptor_count_[(int)slot] = std::max(1u, ycbcr_format_props.combinedImageSamplerDescriptorCount);
 	}
 	return true;
 }
@@ -261,7 +263,10 @@ bool VideoImageSource::acquire(AVFrame *frame) {
 	current_format_ = kNativeFormat;
 #ifdef __APPLE__
 	if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
-		if (!ensure_software_image((uint32_t)frame->width, (uint32_t)frame->height) ||
+		// NV12 or P010, as the session's depth says: the copy is the same
+		// two planes at one or two bytes a sample.
+		current_format_ = two_plane_slot();
+		if (!ensure_software_image((uint32_t)frame->width, (uint32_t)frame->height, two_plane_format()) ||
 			!upload_videotoolbox_frame(frame)) {
 			return false;
 		}
@@ -271,7 +276,10 @@ bool VideoImageSource::acquire(AVFrame *frame) {
 	}
 #endif
 	if (frame->format != AV_PIX_FMT_VAAPI && frame->format != AV_PIX_FMT_D3D11) {
-		if (!ensure_software_image((uint32_t)frame->width, (uint32_t)frame->height) ||
+		// Software decode is 8-bit, and only h264 ever falls back to it --
+		// never a codec a 10-bit session runs on -- so its sampler is
+		// there whenever a frame reaches here.
+		if (!ensure_software_image((uint32_t)frame->width, (uint32_t)frame->height, kVideoFormat) ||
 			!upload_software_frame(frame)) {
 			return false;
 		}
@@ -295,6 +303,7 @@ bool VideoImageSource::acquire(AVFrame *frame) {
 		return false;
 	}
 	current_source_ = Source::Dmabuf;
+	current_format_ = two_plane_slot();
 	current_view_ = imported_.view;
 #else
 	SLOG_ERROR("video_image_source: pix_fmt %d can't arrive on this platform", frame->format);
@@ -389,17 +398,18 @@ bool VideoImageSource::acquire_vulkan_frame(AVFrame *frame) {
 	auto *vk_frames = (AVVulkanFramesContext *)frames->hwctx;
 	auto *vkf = (AVVkFrame *)frame->data[0];
 
-	// FFmpeg's decode output for the 8-bit 4:2:0 streams wraith sends: one
-	// multi-planar image, not one image per plane -- NV12 from Vulkan
-	// Video, 3-plane I420 from PyroWave.
+	// FFmpeg's decode output for the 4:2:0 streams wraith sends: one
+	// multi-planar image, not one image per plane -- NV12 (P010 at 10
+	// bits) from Vulkan Video, 3-plane I420 (16-bit planes at 10) from
+	// PyroWave. Only the session depth's formats have samplers.
 	VkFormat format = vk_frames->format[0];
-	if ((format != kNv12Format && format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM) ||
-		vkf->img[1] != VK_NULL_HANDLE) {
-		SLOG_ERROR("video_image_source: Vulkan frame isn't a single NV12 or I420 image (VkFormat %d)",
-			(int)format);
+	if ((format != two_plane_format() && format != three_plane_format()) || vkf->img[1] != VK_NULL_HANDLE) {
+		SLOG_ERROR("video_image_source: Vulkan frame isn't a single 2- or 3-plane image of the session's "
+				   "%u-bit depth (VkFormat %d)",
+			color_.bit_depth, (int)format);
 		return false;
 	}
-	vk_format_ = format == kNv12Format ? VideoFormat::Nv12 : VideoFormat::I420;
+	vk_format_ = format == two_plane_format() ? two_plane_slot() : three_plane_slot();
 	if (!supports(vk_format_)) {
 		SLOG_ERROR("video_image_source: Vulkan frame but no sampler for its format");
 		return false;
@@ -410,7 +420,7 @@ bool VideoImageSource::acquire_vulkan_frame(AVFrame *frame) {
 	// support as a whole -- so narrow this view to sampling.
 	VkSamplerYcbcrConversionInfo conv_ref{};
 	conv_ref.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
-	conv_ref.conversion = vk_format_ == VideoFormat::Nv12 ? ycbcr_conversion_ : i420_conversion_;
+	conv_ref.conversion = vk_format_ == two_plane_slot() ? ycbcr_conversion_ : i420_conversion_;
 	VkImageViewUsageCreateInfo usage_info{};
 	usage_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
 	usage_info.pNext = &conv_ref;
@@ -543,8 +553,19 @@ bool VideoImageSource::import_frame(AVFrame *frame, Imported *out) {
 		}
 	};
 
-	if (desc.num_layers != 2) {
-		SLOG_ERROR("video_image_source: expected NV12 (2 layers), got %u", desc.num_layers);
+	// NV12 or P010, whichever the stream's depth made the decoder produce;
+	// the sampler was built for the session's, and the host promised the
+	// two agree (gdp-spec.md §7.3).
+	const VkFormat format = desc.fourcc == VA_FOURCC_P010 ? kP010Format : kNv12Format;
+	if (desc.num_layers != 2 || (desc.fourcc != VA_FOURCC_NV12 && desc.fourcc != VA_FOURCC_P010)) {
+		SLOG_ERROR("video_image_source: expected NV12 or P010 (2 layers), got fourcc 0x%08x with %u layers",
+			desc.fourcc, desc.num_layers);
+		close_desc_fds();
+		return false;
+	}
+	if (format != two_plane_format()) {
+		SLOG_ERROR("video_image_source: decoder produced %s for a %u-bit session",
+			format == kP010Format ? "P010" : "NV12", color_.bit_depth);
 		close_desc_fds();
 		return false;
 	}
@@ -577,7 +598,7 @@ bool VideoImageSource::import_frame(AVFrame *frame, Imported *out) {
 	image_info.pNext = &ext_image_info;
 	image_info.flags = shared_object ? 0 : VK_IMAGE_CREATE_DISJOINT_BIT;
 	image_info.imageType = VK_IMAGE_TYPE_2D;
-	image_info.format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+	image_info.format = format;
 	// frame->width/height, not desc.width/height: the VASurface is padded
 	// to the codec's block size, and the rows/columns past the picture
 	// must not be sampled. H.264/H.265 signal the real crop and FFmpeg
@@ -684,8 +705,7 @@ bool VideoImageSource::import_frame(AVFrame *frame, Imported *out) {
 	VkSamplerYcbcrConversionInfo conv_ref{};
 	conv_ref.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
 	conv_ref.conversion = ycbcr_conversion_;
-	return dev_->create_image_view(out->image, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, &conv_ref, &out->view,
-		"vkCreateImageView(imported)");
+	return dev_->create_image_view(out->image, format, &conv_ref, &out->view, "vkCreateImageView(imported)");
 }
 
 void VideoImageSource::destroy_imported(Imported *imported) {
@@ -780,29 +800,10 @@ bool VideoImageSource::ensure_shared_texture(AVD3D11VADeviceContext *d3d11, uint
 	ID3D11Device *device = d3d11->device;
 
 	D3D11_TEXTURE2D_DESC desc{};
-	desc.Width = width;
-	desc.Height = height;
-	desc.MipLevels = 1;
-	desc.ArraySize = 1;
-	// Single-plane, not the decoder's NV12: see the header for the plane-
-	// offset mismatch that makes a shared planar texture unusable here.
-	desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-	desc.SampleDesc.Count = 1;
-	desc.Usage = D3D11_USAGE_DEFAULT;
-	// RENDER_TARGET is what lets the video processor write into it.
-	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-	// Vulkan imports an NT handle, and D3D11 only issues one for a resource
-	// also marked SHARED (or SHARED_KEYEDMUTEX, which would buy a GPU-side
-	// lock this design doesn't use -- convert_shared_frame() waits on the CPU).
-	desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
-	if (FAILED(device->CreateTexture2D(&desc, nullptr, &hw_texture_))) {
-		SLOG_ERROR("video_image_source: CreateTexture2D(shared BGRA %ux%u) failed", width, height);
-		destroy_shared_texture();
-		return false;
-	}
-
-	// The NV12 -> BGRA converter. Fixed-function video hardware, so this
-	// costs far less than the shader pass it replaces would.
+	// The NV12/P010 -> RGB converter, first: which output format the
+	// texture gets depends on what it can write. Fixed-function video
+	// hardware, so this costs far less than the shader pass it replaces
+	// would.
 	D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
 	content.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
 	content.InputWidth = width;
@@ -817,12 +818,63 @@ bool VideoImageSource::ensure_shared_texture(AVD3D11VADeviceContext *d3d11, uint
 		return false;
 	}
 
+	// A 10-bit session's frames are P010, and the converter keeps their
+	// depth where it can write 10-bit RGB (R10G10B10A2); a processor that
+	// can't gets BGRA8, which brings the host's gradient steps back but
+	// still shows a picture. The decoder probe (codec_support.cpp) only
+	// declared 10 bits where the decoder does P010, not the processor.
+	hw_ten_bit_ = false;
+	DXGI_FORMAT output_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+	if (color_.bit_depth > 8) {
+		UINT in_flags = 0;
+		UINT out_flags = 0;
+		if (FAILED(hw_processor_enum_->CheckVideoProcessorFormat(DXGI_FORMAT_P010, &in_flags)) ||
+			!(in_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT)) {
+			SLOG_ERROR("video_image_source: the video processor doesn't take P010 input");
+			destroy_shared_texture();
+			return false;
+		}
+		if (SUCCEEDED(
+				hw_processor_enum_->CheckVideoProcessorFormat(DXGI_FORMAT_R10G10B10A2_UNORM, &out_flags)) &&
+			(out_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT)) {
+			hw_ten_bit_ = true;
+			output_format = DXGI_FORMAT_R10G10B10A2_UNORM;
+		} else {
+			SLOG_INFO("video_image_source: the video processor can't write 10-bit RGB; converting to BGRA8");
+		}
+	}
+
+	D3D11_TEXTURE2D_DESC desc{};
+	desc.Width = width;
+	desc.Height = height;
+	desc.MipLevels = 1;
+	desc.ArraySize = 1;
+	// Single-plane, not the decoder's NV12/P010: see the header for the
+	// plane-offset mismatch that makes a shared planar texture unusable
+	// here.
+	desc.Format = output_format;
+	desc.SampleDesc.Count = 1;
+	desc.Usage = D3D11_USAGE_DEFAULT;
+	// RENDER_TARGET is what lets the video processor write into it.
+	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+	// Vulkan imports an NT handle, and D3D11 only issues one for a resource
+	// also marked SHARED (or SHARED_KEYEDMUTEX, which would buy a GPU-side
+	// lock this design doesn't use -- convert_shared_frame() waits on the CPU).
+	desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
+	if (FAILED(device->CreateTexture2D(&desc, nullptr, &hw_texture_))) {
+		SLOG_ERROR("video_image_source: CreateTexture2D(shared %s %ux%u) failed",
+			hw_ten_bit_ ? "R10G10B10A2" : "BGRA", width, height);
+		destroy_shared_texture();
+		return false;
+	}
+
 	// Match what the Linux ycbcr sampler is configured for, so both platforms
-	// put the same colours on screen: studio-range (16-235) BT.601 in --
-	// wraith's encoders don't signal full range -- full-range RGB out.
+	// put the same colours on screen: the matrix and range the host says it
+	// converted with (OutputDescriptor.color), full-range RGB out.
 	D3D11_VIDEO_PROCESSOR_COLOR_SPACE input_space{};
-	input_space.YCbCr_Matrix = 0; // BT.601
-	input_space.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
+	input_space.YCbCr_Matrix = color_.matrix == ColorMatrix::Bt601 ? 0 : 1; // 0 BT.601, 1 BT.709
+	input_space.Nominal_Range = color_.range == ColorRange::Full ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255
+																 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235;
 	d3d11->video_context->VideoProcessorSetStreamColorSpace(hw_processor_, 0, &input_space);
 	D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_space{};
 	output_space.RGB_Range = 0; // full
@@ -879,11 +931,13 @@ bool VideoImageSource::ensure_shared_texture(AVD3D11VADeviceContext *d3d11, uint
 	// One plane, one allocation, one VkDeviceMemory -- none of the dmabuf
 	// import's disjoint per-plane binding, and (see the header) no planar
 	// layout for the two APIs to disagree about.
+	// DXGI's R10G10B10A2 is Vulkan's A2B10G10R10 (both: R in the low bits).
+	const VkFormat vk_format = hw_ten_bit_ ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : kVideoFormat;
 	VkImageCreateInfo image_info{};
 	image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	image_info.pNext = &external_info;
 	image_info.imageType = VK_IMAGE_TYPE_2D;
-	image_info.format = kVideoFormat;
+	image_info.format = vk_format;
 	image_info.extent = {width, height, 1};
 	image_info.mipLevels = 1;
 	image_info.arrayLayers = 1;
@@ -948,7 +1002,7 @@ bool VideoImageSource::ensure_shared_texture(AVD3D11VADeviceContext *d3d11, uint
 
 	// No ycbcr conversion in the pNext chain: the video processor already
 	// produced RGB, and init()'s sampler is a plain one to match.
-	if (!dev_->create_image_view(hw_image_.image, kVideoFormat, nullptr, &hw_image_.view,
+	if (!dev_->create_image_view(hw_image_.image, vk_format, nullptr, &hw_image_.view,
 			"vkCreateImageView(shared)")) {
 		destroy_shared_texture();
 		return false;
@@ -980,7 +1034,8 @@ bool VideoImageSource::ensure_shared_texture(AVD3D11VADeviceContext *d3d11, uint
 
 	hw_width_ = width;
 	hw_height_ = height;
-	SLOG_DEBUG("video_image_source: sharing a %ux%u BGRA D3D11 texture into Vulkan", width, height);
+	SLOG_DEBUG("video_image_source: sharing a %ux%u %s D3D11 texture into Vulkan", width, height,
+		hw_ten_bit_ ? "R10G10B10A2" : "BGRA");
 	return true;
 }
 
@@ -1024,46 +1079,54 @@ void VideoImageSource::destroy_software_image() {
 	sw_image_.destroy(dev_->device());
 	sw_image_width_ = 0;
 	sw_image_height_ = 0;
+	sw_image_format_ = VK_FORMAT_UNDEFINED;
 }
 
-bool VideoImageSource::ensure_software_image(uint32_t width, uint32_t height) {
-	if (sw_image_.image != VK_NULL_HANDLE && sw_image_width_ == width && sw_image_height_ == height) {
+bool VideoImageSource::ensure_software_image(uint32_t width, uint32_t height, VkFormat format) {
+	if (sw_image_.image != VK_NULL_HANDLE && sw_image_width_ == width && sw_image_height_ == height &&
+		sw_image_format_ == format) {
 		return true;
 	}
 	destroy_software_image();
+
+	// A planar format (NV12 or P010) is sampled through the 2-plane ycbcr
+	// conversion; BGRA (Windows' software path) through the plain sampler.
+	const bool planar = format != VK_FORMAT_B8G8R8A8_UNORM;
+	if (planar && (format != two_plane_format() || !ycbcr_conversion_)) {
+		SLOG_ERROR("video_image_source: no sampler for a %s staging image on this %u-bit session",
+			format == kP010Format ? "P010" : "NV12", color_.bit_depth);
+		return false;
+	}
 
 	// Same format the sampler/video pipeline were built for -- no disjoint
 	// flag (a single VkDeviceMemory backs it; unlike the dmabuf import path,
 	// this memory isn't coming from separate driver-allocated objects),
 	// linear tiling so vkGetImageSubresourceLayout gives usable
 	// offsets/pitches for the host-mapped writes in upload_software_frame().
-	if (!dev_->create_host_image(kVideoFormat, width, height, VK_IMAGE_LAYOUT_UNDEFINED, &sw_image_.image,
+	if (!dev_->create_host_image(format, width, height, VK_IMAGE_LAYOUT_UNDEFINED, &sw_image_.image,
 			&sw_image_.memory, "software staging image")) {
 		destroy_software_image();
 		return false;
 	}
 
-#ifdef _WIN32
-	const void *view_pnext = nullptr; // BGRA: nothing for a ycbcr conversion to do
-#else
 	VkSamplerYcbcrConversionInfo conv_ref{};
 	conv_ref.sType = VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO;
 	conv_ref.conversion = ycbcr_conversion_;
-	const void *view_pnext = &conv_ref;
-#endif
-	if (!dev_->create_image_view(sw_image_.image, kVideoFormat, view_pnext, &sw_image_.view,
+	const void *view_pnext = planar ? &conv_ref : nullptr; // BGRA: nothing for a conversion to do
+	if (!dev_->create_image_view(sw_image_.image, format, view_pnext, &sw_image_.view,
 			"vkCreateImageView(sw)")) {
 		destroy_software_image();
 		return false;
 	}
 
-#ifdef _WIN32
-	VkImageSubresource planes[1] = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0}};
-#else
 	VkImageSubresource planes[2] = {{VK_IMAGE_ASPECT_PLANE_0_BIT, 0, 0}, {VK_IMAGE_ASPECT_PLANE_1_BIT, 0, 0}};
-#endif
+	size_t plane_count = 2;
+	if (!planar) {
+		planes[0] = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+		plane_count = 1;
+	}
 	VkDevice device = dev_->device();
-	for (size_t i = 0; i < std::size(planes); i++) {
+	for (size_t i = 0; i < plane_count; i++) {
 		vkGetImageSubresourceLayout(device, sw_image_.image, &planes[i], &sw_planes_[i]);
 	}
 	void *mapped = nullptr;
@@ -1075,6 +1138,7 @@ bool VideoImageSource::ensure_software_image(uint32_t width, uint32_t height) {
 
 	sw_image_width_ = width;
 	sw_image_height_ = height;
+	sw_image_format_ = format;
 	return true;
 }
 
@@ -1089,13 +1153,22 @@ bool VideoImageSource::upload_software_frame(AVFrame *frame) {
 
 #ifdef _WIN32
 	// Windows samples BGRA (see the header), so the conversion the ycbcr
-	// sampler does for free on Linux has to happen here instead: BT.601,
-	// studio range, the same coefficients VideoProcessorSetStreamColorSpace
-	// is given on the hardware path so both look alike. A plain scalar loop,
-	// like the NV12 interleave below -- this is the fallback path, and a
-	// client with no GPU decoder has worse problems than its speed.
+	// sampler does for free on Linux has to happen here instead: the
+	// session's matrix (OutputDescriptor.color), studio range, as
+	// VideoProcessorSetStreamColorSpace is given on the hardware path so
+	// both look alike. 8.8 fixed point: 298 = 255/219, and the chroma
+	// factors are BT.601-7's / BT.709-6's inverse matrices times 255/224. A
+	// plain scalar loop, like the NV12 interleave below -- this is the
+	// fallback path, and a client with no GPU decoder has worse problems
+	// than its speed. (Only BT.601 and BT.709 reach it: software decode is
+	// 8-bit SDR.)
 	const VkSubresourceLayout &layout = sw_planes_[0];
 	auto clamp8 = [](int v) { return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v)); };
+	const bool bt709 = color_.matrix != ColorMatrix::Bt601;
+	const int k_rv = bt709 ? 459 : 409;
+	const int k_gu = bt709 ? 55 : 100;
+	const int k_gv = bt709 ? 136 : 208;
+	const int k_bu = bt709 ? 541 : 516;
 
 	for (uint32_t y = 0; y < sw_image_height_; y++) {
 		uint8_t *dst = sw_mapped_ + layout.offset + (size_t)y * layout.rowPitch;
@@ -1106,9 +1179,9 @@ bool VideoImageSource::upload_software_frame(AVFrame *frame) {
 			int c = luma[x] - 16;
 			int d = cb[x / 2] - 128;
 			int e = cr[x / 2] - 128;
-			dst[x * 4 + 0] = clamp8((298 * c + 516 * d + 128) >> 8);           // B
-			dst[x * 4 + 1] = clamp8((298 * c - 100 * d - 208 * e + 128) >> 8); // G
-			dst[x * 4 + 2] = clamp8((298 * c + 409 * e + 128) >> 8);           // R
+			dst[x * 4 + 0] = clamp8((298 * c + k_bu * d + 128) >> 8);            // B
+			dst[x * 4 + 1] = clamp8((298 * c - k_gu * d - k_gv * e + 128) >> 8); // G
+			dst[x * 4 + 2] = clamp8((298 * c + k_rv * e + 128) >> 8);            // R
 			dst[x * 4 + 3] = 255;
 		}
 	}
@@ -1143,18 +1216,21 @@ bool VideoImageSource::upload_software_frame(AVFrame *frame) {
 #ifdef __APPLE__
 
 bool VideoImageSource::upload_videotoolbox_frame(AVFrame *frame) {
-	// FFmpeg's VideoToolbox hwaccel hands out 8-bit 4:2:0 as NV12 in video
-	// range -- the same layout and range the staging image and the ycbcr
+	// FFmpeg's VideoToolbox hwaccel hands out 8-bit 4:2:0 as NV12 and
+	// 10-bit as P010 ('x420': 16-bit samples, the 10 bits at the top), both
+	// in video range -- the same layouts the staging image and the ycbcr
 	// sampler are set up for, so this is two plane copies and nothing else.
 	auto pixel_buffer = (CVPixelBufferRef)frame->data[3];
 	OSType pixel_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
-	if (pixel_format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
-		CVPixelBufferGetPlaneCount(pixel_buffer) != 2) {
-		SLOG_ERROR("video_image_source: VideoToolbox frame isn't video-range NV12 (format '%c%c%c%c')",
-			(char)(pixel_format >> 24), (char)(pixel_format >> 16), (char)(pixel_format >> 8),
-			(char)pixel_format);
+	const OSType wanted = color_.bit_depth > 8 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+											   : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+	if (pixel_format != wanted || CVPixelBufferGetPlaneCount(pixel_buffer) != 2) {
+		SLOG_ERROR("video_image_source: VideoToolbox frame isn't video-range %s (format '%c%c%c%c')",
+			color_.bit_depth > 8 ? "P010" : "NV12", (char)(pixel_format >> 24), (char)(pixel_format >> 16),
+			(char)(pixel_format >> 8), (char)pixel_format);
 		return false;
 	}
+	const uint32_t bytes_per_sample = color_.bit_depth > 8 ? 2 : 1;
 	// VideoToolbox's decode for this frame has finished by the time FFmpeg
 	// returns it (its hwaccel waits on each one), so the lock only maps it.
 	if (CVPixelBufferLockBaseAddress(pixel_buffer, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
@@ -1171,9 +1247,10 @@ bool VideoImageSource::upload_videotoolbox_frame(AVFrame *frame) {
 		uint32_t rows;
 	};
 	const Plane planes[2] = {
-		{sw_image_width_,
+		{sw_image_width_ * bytes_per_sample,
 			std::min(sw_image_height_, (uint32_t)CVPixelBufferGetHeightOfPlane(pixel_buffer, 0))},
-		{chroma_width * 2, std::min(chroma_height, (uint32_t)CVPixelBufferGetHeightOfPlane(pixel_buffer, 1))},
+		{chroma_width * 2 * bytes_per_sample,
+			std::min(chroma_height, (uint32_t)CVPixelBufferGetHeightOfPlane(pixel_buffer, 1))},
 	};
 	for (size_t i = 0; i < 2; i++) {
 		const auto *src = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixel_buffer, i);

@@ -235,31 +235,91 @@ struct ConnCallbacks {
 		return 0;
 	}
 
-	static int recv_stream_data(ngtcp2_conn *conn, uint32_t, int64_t stream_id, uint64_t, const uint8_t *data,
-		size_t datalen, void *ud, void *) {
+	static int recv_stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id, uint64_t,
+		const uint8_t *data, size_t datalen, void *ud, void *) {
 		Impl *c = impl(ud);
-		// Consumed straight away (copied out for dispatch()), so the credit
-		// goes straight back.
-		ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
+		// Copied out for dispatch() straight away, so the connection's credit
+		// goes straight back -- for every stream, so that an additional
+		// stream whose reader is slow can never use up the window control and
+		// input need. The stream's own credit goes back here too, except on
+		// additional streams, where the application returns it as it gets
+		// through the data (Stream::consume()).
 		ngtcp2_conn_extend_max_offset(conn, datalen);
-		if (datalen == 0) {
+		auto it = c->net.streams.find(stream_id);
+		if (it == c->net.streams.end() || !it->second.manual_credit) {
+			ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
+		}
+		if (it == c->net.streams.end()) {
 			return 0;
+		}
+		bool fin = (flags & NGTCP2_STREAM_DATA_FLAG_FIN) != 0;
+		if (datalen == 0 && !fin) {
+			return 0;
+		}
+		if (fin) {
+			it->second.peer_fin = true;
+		}
+		std::vector<uint8_t> copy(data, data + datalen);
+		c->core->events.post([weak = it->second.stream, copy = std::move(copy), fin]() {
+			auto stream = weak.lock();
+			if (!stream || !stream->self) {
+				return;
+			}
+			if (!copy.empty()) {
+				auto on_data = stream->self->on_data;
+				if (on_data) {
+					on_data(copy.data(), copy.size());
+				}
+			}
+			// on_data may have destroyed the stream.
+			if (fin && stream->self) {
+				auto on_fin = stream->self->on_fin;
+				if (on_fin) {
+					on_fin();
+				}
+			}
+		});
+		return 0;
+	}
+
+	static int stream_reset(ngtcp2_conn *, int64_t stream_id, uint64_t, uint64_t app_error_code, void *ud,
+		void *) {
+		Impl *c = impl(ud);
+		auto it = c->net.streams.find(stream_id);
+		if (it == c->net.streams.end()) {
+			return 0;
+		}
+		it->second.peer_reset = true;
+		c->core->events.post([weak = it->second.stream, app_error_code]() {
+			auto stream = weak.lock();
+			if (!stream || !stream->self) {
+				return;
+			}
+			auto on_reset = stream->self->on_reset;
+			if (on_reset) {
+				on_reset(app_error_code);
+			}
+		});
+		return 0;
+	}
+
+	static int stream_close(ngtcp2_conn *conn, uint32_t, int64_t stream_id, uint64_t, void *ud, void *) {
+		Impl *c = impl(ud);
+		// gdp-spec.md §2.2: the host keeps the client's allowance of
+		// additional streams whole, one new one for each that closes. ngtcp2
+		// only does this itself for streams it never reported open.
+		if (c->is_server && is_additional_stream(stream_id) && c->net.additional_streams) {
+			ngtcp2_conn_extend_max_streams_bidi(conn, 1);
 		}
 		auto it = c->net.streams.find(stream_id);
 		if (it == c->net.streams.end()) {
 			return 0;
 		}
-		std::vector<uint8_t> copy(data, data + datalen);
-		c->core->events.post([weak = it->second.stream, copy = std::move(copy)]() {
-			auto stream = weak.lock();
-			if (!stream || !stream->self) {
-				return;
-			}
-			auto on_data = stream->self->on_data;
-			if (on_data) {
-				on_data(copy.data(), copy.size());
-			}
-		});
+		if (it->second.released) {
+			c->net.streams.erase(it);
+		} else {
+			it->second.closed = true;
+		}
 		return 0;
 	}
 
@@ -276,6 +336,28 @@ struct ConnCallbacks {
 			s.chunks_offset += s.chunks.front().size();
 			s.chunks.pop_front();
 		}
+		if (is_additional_stream(stream_id)) {
+			auto stream = s.stream.lock();
+			if (stream) {
+				stream->acked.store(acked_end, std::memory_order_relaxed);
+				if (!stream->acked_posted.exchange(true)) {
+					c->core->events.post([weak = s.stream]() {
+						auto stream = weak.lock();
+						if (!stream) {
+							return;
+						}
+						stream->acked_posted.store(false);
+						if (!stream->self) {
+							return;
+						}
+						auto on_acked = stream->self->on_acked;
+						if (on_acked) {
+							on_acked(stream->acked.load(std::memory_order_relaxed));
+						}
+					});
+				}
+			}
+		}
 		return 0;
 	}
 
@@ -284,15 +366,17 @@ struct ConnCallbacks {
 	// which QUIC doesn't guarantee matches the order they were opened in.
 	static int stream_open(ngtcp2_conn *, int64_t stream_id, void *ud) {
 		Impl *c = impl(ud);
-		if (!c->is_server || (stream_id != 0 && stream_id != 4)) {
-			// gdp-spec.md §2.2, "Additional streams": no stream kind is
-			// defined yet, so refuse it (RESET_STREAM + STOP_SENDING with
-			// UNSUPPORTED) instead of leaving the peer's data unread.
+		bool additional = is_additional_stream(stream_id);
+		if (!c->is_server || (additional && !c->net.additional_streams)) {
+			// gdp-spec.md §2.2, "Additional streams": a client takes no
+			// streams at all, and a host none beyond control and input until
+			// a capability that uses them is in effect (allow_streams()), so
+			// refuse it (RESET_STREAM + STOP_SENDING with UNSUPPORTED) instead
+			// of leaving the peer's data unread.
 			ngtcp2_conn_shutdown_stream(c->net.conn, 0, stream_id,
 				static_cast<uint64_t>(ErrorCode::kUnsupported));
 			return 0;
 		}
-		bool is_control = stream_id == 0;
 		auto stream = std::make_shared<Stream::Impl>();
 		stream->core = c->core;
 		stream->conn = c->weak_self;
@@ -302,6 +386,27 @@ struct ConnCallbacks {
 		ns.stream = stream;
 		ns.opened = true;
 		ns.any_sent = true; // the peer's stream: nothing of ours to announce
+		ns.manual_credit = additional;
+		if (additional) {
+			// Owned by on_stream's handler, made on the host thread; until
+			// then this closure keeps its Impl alive. Nobody to take it is
+			// the same as a kind nobody implements.
+			c->core->events.post([weak = c->weak_self, stream]() {
+				auto impl = weak.lock();
+				if (!impl || !impl->self) {
+					return;
+				}
+				auto owned = std::make_unique<Stream>(stream);
+				auto handler = impl->self->on_stream;
+				if (handler) {
+					handler(std::move(owned));
+				} else {
+					owned->reset(static_cast<uint64_t>(ErrorCode::kUnsupported));
+				}
+			});
+			return 0;
+		}
+		bool is_control = stream_id == 0;
 		// The public Stream is made on the host thread; until then this
 		// closure is what keeps its Impl alive.
 		c->core->events.post([weak = c->weak_self, stream, is_control]() {
@@ -405,6 +510,8 @@ struct ConnCallbacks {
 		cb.recv_stream_data = recv_stream_data;
 		cb.acked_stream_data_offset = acked_stream_data_offset;
 		cb.stream_open = stream_open;
+		cb.stream_reset = stream_reset;
+		cb.stream_close = stream_close;
 		cb.recv_datagram = recv_datagram;
 		cb.ack_datagram = ack_datagram;
 		cb.lost_datagram = lost_datagram;
@@ -758,7 +865,9 @@ void Connection::Impl::open_stream(int64_t id, std::weak_ptr<Stream::Impl> strea
 	if (!net.conn || net.linger_until) {
 		return;
 	}
-	net.streams[id].stream = std::move(stream);
+	NetStream &ns = net.streams[id];
+	ns.stream = std::move(stream);
+	ns.manual_credit = is_additional_stream(id);
 	net.pending_open.push_back(id);
 	try_open_pending_streams();
 }
@@ -778,8 +887,19 @@ void Connection::Impl::try_open_pending_streams() {
 		}
 		// Stream IDs go 0, 4, 8, ... in the order streams are opened, and
 		// the host numbered them in that same order (open_*_stream()).
-		net.streams[want].opened = true;
-		(void)id;
+		if (id != want) {
+			fprintf(stderr, "gdp: stream %lld opened as %lld\n", (long long)want, (long long)id);
+		}
+		auto it = net.streams.find(want);
+		if (it == net.streams.end()) {
+			continue;
+		}
+		if (it->second.abort_on_open) {
+			ngtcp2_conn_shutdown_stream(net.conn, 0, id, it->second.abort_code);
+			net.streams.erase(it);
+			continue;
+		}
+		it->second.opened = true;
 	}
 }
 
@@ -801,7 +921,7 @@ void Connection::Impl::stream_send(int64_t id, std::vector<uint8_t> data, bool f
 	}
 }
 
-void Connection::Impl::stream_abort(int64_t id) {
+void Connection::Impl::stream_abort(int64_t id, uint64_t error_code) {
 	if (!net.conn || net.linger_until) {
 		return;
 	}
@@ -809,10 +929,69 @@ void Connection::Impl::stream_abort(int64_t id) {
 	if (it == net.streams.end()) {
 		return;
 	}
-	if (it->second.opened) {
-		ngtcp2_conn_shutdown_stream(net.conn, 0, id, 0);
+	if (it->second.opened && !it->second.closed) {
+		ngtcp2_conn_shutdown_stream(net.conn, 0, id, error_code);
+	} else if (!it->second.opened) {
+		// Still waiting for credit: it must never be opened now.
+		auto pending = std::find(net.pending_open.begin(), net.pending_open.end(), id);
+		if (pending != net.pending_open.end()) {
+			// Its ID is already spoken for by the streams queued behind it, so
+			// it still opens -- empty, and reset straight away.
+			NetStream &ns = it->second;
+			ns.stream.reset();
+			ns.chunks.clear();
+			ns.end = ns.written = ns.chunks_offset = 0;
+			ns.abort_on_open = true;
+			ns.abort_code = error_code;
+			return;
+		}
 	}
 	net.streams.erase(it);
+}
+
+void Connection::Impl::stream_release(int64_t id) {
+	auto it = net.streams.find(id);
+	if (it == net.streams.end()) {
+		return;
+	}
+	NetStream &ns = it->second;
+	if (!is_additional_stream(id) || !ns.fin_requested) {
+		stream_abort(id);
+		return;
+	}
+	if (ns.closed) {
+		net.streams.erase(it);
+		return;
+	}
+	// Our direction is finished: let what is still on its way arrive (a
+	// last reply before the FIN), and only stop reading the peer's, unless
+	// that already ended too.
+	if (ns.opened && !ns.peer_fin && !ns.peer_reset) {
+		ngtcp2_conn_shutdown_stream_read(net.conn, 0, id, 0);
+	}
+	// ngtcp2 reads our unacked data from `chunks` until the stream closes:
+	// dropped in stream_close.
+	ns.stream.reset();
+	ns.released = true;
+}
+
+void Connection::Impl::stream_consume(int64_t id, size_t len) {
+	if (!net.conn || net.linger_until) {
+		return;
+	}
+	auto it = net.streams.find(id);
+	if (it == net.streams.end() || it->second.closed || !it->second.opened) {
+		return;
+	}
+	ngtcp2_conn_extend_max_stream_offset(net.conn, id, len);
+}
+
+void Connection::Impl::allow_streams(uint32_t count) {
+	if (!net.conn || net.linger_until || !is_server) {
+		return;
+	}
+	net.additional_streams = true;
+	ngtcp2_conn_extend_max_streams_bidi(net.conn, count);
 }
 
 // --- Writing ---
@@ -972,6 +1151,10 @@ ngtcp2_ssize Connection::Impl::write_packet(ngtcp2_path *path, ngtcp2_pkt_info *
 		// is empty, or the pacer is holding it). The control stream is
 		// small and seldom busy; datagrams going first means a large
 		// message on it (a big clipboard) can't stall the video.
+		//
+		// Streams go lowest ID first (`streams` is ordered), on purpose:
+		// control (0) and input (4) always ahead of additional streams, so a
+		// key press or a StatsReport never queues behind a file's bytes.
 		NetStream *stream = nullptr;
 		int64_t stream_id = -1;
 		for (auto &[id, s] : net.streams) {

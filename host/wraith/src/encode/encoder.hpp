@@ -59,6 +59,17 @@ struct DamageRegion {
 	std::vector<DamageRect> rects;
 };
 
+// The RGB -> YCbCr matrix a session's video is coded with
+// (OutputDescriptor.color.matrix, gdp-spec.md §7.3), always studio range.
+// BT.601 is the block codecs' default, and what every session without the
+// "color" capability gets; BT.709 is what a session that negotiated it
+// gets (GdpSession::session_matrix()). PyroWave converts with its own
+// full-range BT.709 whatever this says.
+enum class ColorMatrix {
+	Bt601,
+	Bt709,
+};
+
 struct EncoderConfig {
 	// The session's negotiated wire codec (gdp-spec.md §6.6). Which
 	// backend actually serves it is encoder_factory.cpp's business --
@@ -78,6 +89,17 @@ struct EncoderConfig {
 	// GOP: no periodic IDRs, only the first and requested ones.
 	uint32_t gop_size = 600;
 	int drm_fd = -1; // render node used to init the encoder's device
+	// Bits per component of the coded pictures (OutputDescriptor.color.
+	// bit_depth, gdp-spec.md §7.3): 8 or 10. The source stays the 8-bit
+	// desktop either way; 10 is encoder precision, which keeps hardware
+	// encoders from reconstructing a dark gradient as 1-level contour
+	// steps (docs/design/encoding.md). Negotiated per session from what
+	// the client declared; a backend that can't code the depth refuses to
+	// open and the session falls back to 8 (encoder_factory.hpp).
+	uint32_t bit_depth = 8;
+	// What the VPP / NVENC / xrgb_to_i420() convert with, and what every
+	// header the backend writes (VUI, AV1 colour config) says.
+	ColorMatrix matrix = ColorMatrix::Bt601;
 };
 
 struct EncodedPacket {

@@ -62,7 +62,7 @@ void test_values_apply() {
 		"[log]\nlevel = \"info\"\n[network]\ncongestion_control = \"bbr\"\nrate_trace = true\n"
 		"pacing_multiplier = 4\npacing_floor_mbps = 900\n"
 		"[encode]\ngop = 0\nmax_bitrate_mbps = 45\nforce_software = true\nnvenc_zero_copy = false\n"
-		"pyrowave_bpp = 0.75\n"
+		"bit_depth = 8\npyrowave_bpp = 0.75\n"
 		"[encode.codecs]\nav1 = true\nh264 = false\npyrowave = true\n"
 		"[refine]\nburst_ms = 200\nsettle_ms = 120\n"));
 	CHECK(load.ok);
@@ -79,6 +79,7 @@ void test_values_apply() {
 	CHECK(c.encode.max_bitrate_mbps == 45);
 	CHECK(c.encode.force_software);
 	CHECK(!c.encode.nvenc_zero_copy);
+	CHECK(c.encode.bit_depth == 8);
 	CHECK(c.encode.pyrowave_bpp == 0.75);
 	CHECK(c.encode.codec_enabled("av1"));
 	CHECK(c.encode.codec_enabled("pyrowave"));
@@ -100,6 +101,8 @@ void test_bad_files_are_rejected_whole() {
 		"[refine\nsettle_ms = 50\n",                      // doesn't parse
 		"refine = 3\n",                                   // section not a table
 		"[encode.codecs]\nav1 = 1\n",                     // wrong type
+		"[encode]\nbit_depth = 10\n",                     // only "auto" or 8
+		"[encode]\nbit_depth = \"8\"\n",                  // the integer, not a string
 		"[encode]\npyrowave_bpp = 0\n",                   // out of range
 		"[encode]\npyrowave_bpp = \"1\"\n",               // wrong type
 	};

@@ -10,6 +10,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vulkan.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <cstdlib>
@@ -18,8 +19,6 @@ extern "C" {
 namespace spectre {
 
 namespace {
-
-constexpr VkFormat kI420Format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
 
 // A layout change on the whole image, ranges and queues left alone.
 void barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout from, VkImageLayout to,
@@ -71,8 +70,17 @@ PyrowaveDecode::~PyrowaveDecode() {
 	close();
 }
 
-bool PyrowaveDecode::open(const VulkanDecodeDevice &device) {
+bool PyrowaveDecode::open(const VulkanDecodeDevice &device, uint32_t bit_depth) {
 	dev_ = &device;
+	// 16-bit planes for a 10-bit session: PyroWave writes R16 views and the
+	// presenter samples G16_B16_R16 through its I420_16 conversion. FFmpeg
+	// names the pool's images by the matching software formats.
+	const bool sixteen_bit = bit_depth > 8;
+	plane_format_ = sixteen_bit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
+	image_format_ =
+		sixteen_bit ? VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM : VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+	sw_format_ = sixteen_bit ? AV_PIX_FMT_YUV420P16 : AV_PIX_FMT_YUV420P;
+	stage_sw_format_ = sixteen_bit ? AV_PIX_FMT_GRAY16 : AV_PIX_FMT_GRAY8;
 
 	queue_.queue = device.graphics_queue;
 	queue_.familyIndex = device.graphics_family;
@@ -95,9 +103,10 @@ bool PyrowaveDecode::open(const VulkanDecodeDevice &device) {
 	// need it, so it can be tried where the direct one also works.
 	const char *force_staged = getenv("SPECTRE_PYROWAVE_STAGED");
 	staged_ = (force_staged && *force_staged == '1') ||
-		!VulkanDevice::pyrowave_writes_planes_directly(device.physical_device);
+		!VulkanDevice::pyrowave_writes_planes_directly(device.physical_device, image_format_);
 	if (staged_) {
-		SLOG_INFO("pyrowave: writing through R8 images and copying into the frame's planes");
+		SLOG_INFO("pyrowave: writing through %s images and copying into the frame's planes",
+			sixteen_bit ? "R16" : "R8");
 	}
 
 	// FFmpeg's view of the same device, for its frame pool: just the
@@ -189,19 +198,19 @@ bool PyrowaveDecode::set_size(uint32_t width, uint32_t height) {
 	}
 	auto *frames = (AVHWFramesContext *)hw_frames_->data;
 	frames->format = AV_PIX_FMT_VULKAN;
-	frames->sw_format = AV_PIX_FMT_YUV420P;
+	frames->sw_format = (AVPixelFormat)sw_format_;
 	frames->width = (int)width;
 	frames->height = (int)height;
 	auto *vk_frames = (AVVulkanFramesContext *)frames->hwctx;
 	vk_frames->tiling = VK_IMAGE_TILING_OPTIMAL;
-	vk_frames->format[0] = kI420Format;
+	vk_frames->format[0] = image_format_;
 	if (staged_) {
 		// Only sampled, and copied into.
 		vk_frames->usage =
 			(VkImageUsageFlagBits)(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
 	} else {
-		// Storage only through the per-plane R8 views PyroWave writes, which is
-		// what MUTABLE_FORMAT + EXTENDED_USAGE allow.
+		// Storage only through the per-plane R8/R16 views PyroWave writes,
+		// which is what MUTABLE_FORMAT + EXTENDED_USAGE allow.
 		vk_frames->usage = (VkImageUsageFlagBits)(VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
 		vk_frames->img_flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
 	}
@@ -209,7 +218,8 @@ bool PyrowaveDecode::set_size(uint32_t width, uint32_t height) {
 	if (ret < 0) {
 		char errbuf[64];
 		av_strerror(ret, errbuf, sizeof(errbuf));
-		SLOG_ERROR("pyrowave: av_hwframe_ctx_init(%ux%u I420) failed: %s", width, height, errbuf);
+		SLOG_ERROR("pyrowave: av_hwframe_ctx_init(%ux%u %s) failed: %s", width, height,
+			av_get_pix_fmt_name((AVPixelFormat)sw_format_), errbuf);
 		return false;
 	}
 	if (staged_ && !open_stage(width, height)) {
@@ -217,12 +227,13 @@ bool PyrowaveDecode::set_size(uint32_t width, uint32_t height) {
 	}
 	width_ = width;
 	height_ = height;
-	SLOG_INFO("pyrowave: decoding %ux%u", width, height);
+	SLOG_INFO("pyrowave: decoding %ux%u into %s planes", width, height,
+		plane_format_ == VK_FORMAT_R16_UNORM ? "16-bit" : "8-bit");
 	return true;
 }
 
-// The staged path's three R8 images per slot, from FFmpeg's pool like every
-// other frame here. Written by PyroWave and read by the copy, never handed
+// The staged path's three R8 (R16) images per slot, from FFmpeg's pool like
+// every other frame here. Written by PyroWave and read by the copy, never handed
 // on, so FFmpeg's own semaphore for them goes unused.
 bool PyrowaveDecode::open_stage(uint32_t width, uint32_t height) {
 	AVBufferRef **contexts[2] = {&stage_luma_frames_, &stage_chroma_frames_};
@@ -234,7 +245,7 @@ bool PyrowaveDecode::open_stage(uint32_t width, uint32_t height) {
 		}
 		auto *frames = (AVHWFramesContext *)(*contexts[i])->data;
 		frames->format = AV_PIX_FMT_VULKAN;
-		frames->sw_format = AV_PIX_FMT_GRAY8; // VK_FORMAT_R8_UNORM
+		frames->sw_format = (AVPixelFormat)stage_sw_format_; // VK_FORMAT_R8_UNORM / R16_UNORM
 		frames->width = (int)sizes[i][0];
 		frames->height = (int)sizes[i][1];
 		auto *vk_frames = (AVVulkanFramesContext *)frames->hwctx;
@@ -245,8 +256,8 @@ bool PyrowaveDecode::open_stage(uint32_t width, uint32_t height) {
 		if (ret < 0) {
 			char errbuf[64];
 			av_strerror(ret, errbuf, sizeof(errbuf));
-			SLOG_ERROR("pyrowave: av_hwframe_ctx_init(%ux%u R8) failed: %s", sizes[i][0], sizes[i][1],
-				errbuf);
+			SLOG_ERROR("pyrowave: av_hwframe_ctx_init(%ux%u %s) failed: %s", sizes[i][0], sizes[i][1],
+				av_get_pix_fmt_name((AVPixelFormat)stage_sw_format_), errbuf);
 			return false;
 		}
 	}
@@ -310,8 +321,9 @@ bool PyrowaveDecode::decode(const uint8_t *data, size_t len, AVFrame *out) {
 
 	bool ok = false;
 	if (staged_) {
-		// Staged: PyroWave writes the three R8 images (GENERAL, for its storage
-		// writes), which are then copied into the planes of the output frame.
+		// Staged: PyroWave writes the three plane images (GENERAL, for its
+		// storage writes), which are then copied into the planes of the
+		// output frame.
 		// Whatever any of them last held is overwritten whole.
 		VkImage stage_images[3];
 		for (int plane = 0; plane < 3; plane++) {
@@ -331,8 +343,8 @@ bool PyrowaveDecode::decode(const uint8_t *data, size_t len, AVFrame *out) {
 			// The luma size for every plane: PyroWave halves it for chroma.
 			view.width = width;
 			view.height = height;
-			view.image_format = VK_FORMAT_R8_UNORM;
-			view.view_format = VK_FORMAT_R8_UNORM;
+			view.image_format = plane_format_;
+			view.view_format = plane_format_;
 			view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 			view.swizzle = VK_COMPONENT_SWIZZLE_IDENTITY;
 			view.layout = VK_IMAGE_LAYOUT_GENERAL;
@@ -384,8 +396,8 @@ bool PyrowaveDecode::decode(const uint8_t *data, size_t len, AVFrame *out) {
 			// The luma size for every plane: PyroWave halves it for chroma.
 			view.width = width;
 			view.height = height;
-			view.image_format = kI420Format;
-			view.view_format = VK_FORMAT_R8_UNORM;
+			view.image_format = image_format_;
+			view.view_format = plane_format_;
 			view.aspect = kPlanes[i];
 			view.swizzle = VK_COMPONENT_SWIZZLE_IDENTITY;
 			view.layout = VK_IMAGE_LAYOUT_GENERAL;

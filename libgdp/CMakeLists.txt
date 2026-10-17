@@ -80,6 +80,7 @@ add_library(gdp STATIC
   src/error_codes.cpp
   src/negotiation.cpp
   src/clipboard.cpp
+  src/file_transfer.cpp
   src/video_codec.cpp
   src/refine.cpp
   src/video_reassembler.cpp
@@ -144,6 +145,10 @@ add_executable(gdp_clipboard_test tests/clipboard_test.cpp)
 target_link_libraries(gdp_clipboard_test PRIVATE gdp)
 add_test(NAME gdp_clipboard_test COMMAND gdp_clipboard_test)
 
+add_executable(gdp_file_transfer_test tests/file_transfer_test.cpp)
+target_link_libraries(gdp_file_transfer_test PRIVATE gdp)
+add_test(NAME gdp_file_transfer_test COMMAND gdp_file_transfer_test)
+
 add_executable(gdp_refine_test tests/refine_test.cpp)
 target_link_libraries(gdp_refine_test PRIVATE gdp)
 add_test(NAME gdp_refine_test COMMAND gdp_refine_test)
@@ -159,6 +164,11 @@ if(NOT WIN32)
   add_executable(gdp_ca_trust_test tests/ca_trust_test.cpp)
   target_link_libraries(gdp_ca_trust_test PRIVATE gdp OpenSSL::Crypto)
   add_test(NAME gdp_ca_trust_test COMMAND gdp_ca_trust_test)
+
+  # Also the openssl CLI and /tmp: additional streams (gdp-spec.md §2.2).
+  add_executable(gdp_additional_stream_test tests/additional_stream_test.cpp)
+  target_link_libraries(gdp_additional_stream_test PRIVATE gdp)
+  add_test(NAME gdp_additional_stream_test COMMAND gdp_additional_stream_test)
 
   add_executable(gdp_stream_loss_test tests/stream_loss_test.cpp)
   target_link_libraries(gdp_stream_loss_test PRIVATE gdp Threads::Threads)

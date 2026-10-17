@@ -8,16 +8,19 @@ namespace wraith::hevc {
 namespace {
 
 // profile_tier_level(profilePresentFlag=1, maxNumSubLayersMinus1=0),
-// H.265 §7.3.3. Fixed to Main profile, main tier, no sub-layers.
-void put_profile_tier_level(BitWriter &bw, uint8_t level_idc) {
-	bw.put_bits(0, 2); // general_profile_space
-	bw.put_bit(0);     // general_tier_flag: main tier
-	bw.put_bits(1, 5); // general_profile_idc = 1 (Main)
+// H.265 §7.3.3. Main or Main10 profile, main tier, no sub-layers.
+void put_profile_tier_level(BitWriter &bw, uint8_t profile_idc, uint8_t level_idc) {
+	bw.put_bits(0, 2);           // general_profile_space
+	bw.put_bit(0);               // general_tier_flag: main tier
+	bw.put_bits(profile_idc, 5); // general_profile_idc: 1 Main, 2 Main10
 	// general_profile_compatibility_flag[32]: bit i says "conforms to
-	// profile i". Main (1) is set; a decoder that only checks the
-	// compatibility bits rather than profile_idc needs it.
+	// profile i". A Main stream also conforms to Main10 (a superset), so
+	// both bits are set for it; a Main10 stream only to Main10. A decoder
+	// that only checks the compatibility bits rather than profile_idc
+	// needs them.
 	for (int i = 0; i < 32; i++) {
-		bw.put_bit(i == 1 ? 1 : 0);
+		bool conforms = i == 2 || (i == 1 && profile_idc == 1);
+		bw.put_bit(conforms ? 1 : 0);
 	}
 	bw.put_bit(1);      // general_progressive_source_flag
 	bw.put_bit(0);      // general_interlaced_source_flag
@@ -30,6 +33,10 @@ void put_profile_tier_level(BitWriter &bw, uint8_t level_idc) {
 }
 
 } // namespace
+
+uint8_t profile_idc_for_bit_depth(uint8_t bit_depth) {
+	return bit_depth > 8 ? 2 : 1;
+}
 
 std::vector<uint8_t> wrap_nal(uint8_t nal_unit_type, const std::vector<uint8_t> &escaped_rbsp) {
 	std::vector<uint8_t> out;
@@ -48,7 +55,7 @@ std::vector<uint8_t> wrap_nal(uint8_t nal_unit_type, const std::vector<uint8_t> 
 // video_parameter_set_rbsp(), §7.3.2.1. A single layer, a single temporal
 // sub-layer, no timing info: everything here is the degenerate case, and
 // the VPS exists at all only because HEVC requires one ahead of the SPS.
-std::vector<uint8_t> build_vps(uint8_t level_idc) {
+std::vector<uint8_t> build_vps(uint8_t level_idc, uint8_t bit_depth) {
 	BitWriter bw;
 	bw.put_bits(0, 4);       // vps_video_parameter_set_id
 	bw.put_bit(1);           // vps_base_layer_internal_flag
@@ -57,7 +64,7 @@ std::vector<uint8_t> build_vps(uint8_t level_idc) {
 	bw.put_bits(0, 3);       // vps_max_sub_layers_minus1
 	bw.put_bit(1);           // vps_temporal_id_nesting_flag
 	bw.put_bits(0xffff, 16); // vps_reserved_0xffff_16bits
-	put_profile_tier_level(bw, level_idc);
+	put_profile_tier_level(bw, profile_idc_for_bit_depth(bit_depth), level_idc);
 	bw.put_bit(1);     // vps_sub_layer_ordering_info_present_flag
 	bw.put_ue(1);      // vps_max_dec_pic_buffering_minus1: current + one reference
 	bw.put_ue(0);      // vps_max_num_reorder_pics: no B-frames, nothing reorders
@@ -76,7 +83,7 @@ std::vector<uint8_t> build_sps(const SpsParams &p) {
 	bw.put_bits(0, 4); // sps_video_parameter_set_id: the VPS above
 	bw.put_bits(0, 3); // sps_max_sub_layers_minus1
 	bw.put_bit(1);     // sps_temporal_id_nesting_flag
-	put_profile_tier_level(bw, p.level_idc);
+	put_profile_tier_level(bw, profile_idc_for_bit_depth(p.bit_depth), p.level_idc);
 	bw.put_ue(0); // sps_seq_parameter_set_id
 	bw.put_ue(1); // chroma_format_idc = 4:2:0
 	bw.put_ue(p.coded_width);
@@ -94,8 +101,8 @@ std::vector<uint8_t> build_sps(const SpsParams &p) {
 		bw.put_ue((p.coded_height - p.height_px) / 2);
 	}
 
-	bw.put_ue(0); // bit_depth_luma_minus8
-	bw.put_ue(0); // bit_depth_chroma_minus8
+	bw.put_ue(p.bit_depth - 8); // bit_depth_luma_minus8
+	bw.put_ue(p.bit_depth - 8); // bit_depth_chroma_minus8
 	bw.put_ue(p.log2_max_pic_order_cnt_lsb_minus4);
 	bw.put_bit(1); // sps_sub_layer_ordering_info_present_flag
 	bw.put_ue(1);  // sps_max_dec_pic_buffering_minus1 -- as in the VPS
@@ -119,9 +126,29 @@ std::vector<uint8_t> build_sps(const SpsParams &p) {
 	bw.put_bit(0); // long_term_ref_pics_present_flag
 	bw.put_bit(p.temporal_mvp_enabled ? 1 : 0);
 	bw.put_bit(p.strong_intra_smoothing_enabled ? 1 : 0);
-	bw.put_bit(0); // vui_parameters_present_flag: see the colour-matrix
-				   // comment in vaapi_encoder_base.cpp -- the convention is
-				   // BT.601 by agreement, not by signalling
+	// vui_parameters(), H.265 §E.2.1: only the colour description, so a
+	// decoder reading the stream on its own (a player on wraith -e's dump,
+	// a browser through WebCodecs) converts with the matrix the session
+	// uses instead of guessing BT.709 for HD. Nothing else in it matters
+	// here: sps_max_num_reorder_pics is already 0, so no
+	// bitstream_restriction is needed to stop a decoder holding frames.
+	bw.put_bit(1);     // vui_parameters_present_flag
+	bw.put_bit(0);     // aspect_ratio_info_present_flag
+	bw.put_bit(0);     // overscan_info_present_flag
+	bw.put_bit(1);     // video_signal_type_present_flag
+	bw.put_bits(5, 3); // video_format: unspecified
+	bw.put_bit(0);     // video_full_range_flag: studio range
+	bw.put_bit(1);     // colour_description_present_flag
+	bw.put_bits(p.colour_primaries, 8);
+	bw.put_bits(p.transfer_characteristics, 8);
+	bw.put_bits(p.matrix_coefficients, 8);
+	bw.put_bit(0); // chroma_loc_info_present_flag
+	bw.put_bit(0); // neutral_chroma_indication_flag
+	bw.put_bit(0); // field_seq_flag
+	bw.put_bit(0); // frame_field_info_present_flag
+	bw.put_bit(0); // default_display_window_flag
+	bw.put_bit(0); // vui_timing_info_present_flag
+	bw.put_bit(0); // bitstream_restriction_flag
 	bw.put_bit(0); // sps_extension_present_flag
 	bw.rbsp_trailing_bits();
 	return bw.bytes();

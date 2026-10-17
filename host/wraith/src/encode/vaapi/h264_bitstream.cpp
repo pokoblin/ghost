@@ -61,29 +61,29 @@ std::vector<uint8_t> build_sps(const SpsParams &p) {
 	bw.put_bit(1); // vui_parameters_present_flag
 	bw.put_bit(0); // aspect_ratio_info_present_flag
 	bw.put_bit(0); // overscan_info_present_flag
-	// BT.601 studio range, what VPP converts to (vaapi_encoder_base.cpp)
-	// and spectre decodes as. Unsignalled, each decoder guesses: Firefox
-	// takes HD video as BT.709 and every colour shifts.
+	// The session's matrix, studio range: what VPP converts to
+	// (vaapi_encoder_base.cpp) and OutputDescriptor.color says.
+	// Unsignalled, each decoder guesses: Firefox takes HD video as BT.709.
 	bw.put_bit(1);     // video_signal_type_present_flag
 	bw.put_bits(5, 3); // video_format: unspecified
 	bw.put_bit(0);     // video_full_range_flag: studio range
 	bw.put_bit(1);     // colour_description_present_flag
-	bw.put_bits(6, 8); // colour_primaries: SMPTE 170M
-	bw.put_bits(6, 8); // transfer_characteristics: SMPTE 170M
-	bw.put_bits(6, 8); // matrix_coefficients: SMPTE 170M (BT.601)
-	bw.put_bit(0);     // chroma_loc_info_present_flag
-	bw.put_bit(0);     // timing_info_present_flag
-	bw.put_bit(0);     // nal_hrd_parameters_present_flag
-	bw.put_bit(0);     // vcl_hrd_parameters_present_flag
-	bw.put_bit(0);     // pic_struct_present_flag
-	bw.put_bit(1);     // bitstream_restriction_flag
-	bw.put_bit(1);     // motion_vectors_over_pic_boundaries_flag
-	bw.put_ue(2);      // max_bytes_per_pic_denom (the inferred default)
-	bw.put_ue(1);      // max_bits_per_mb_denom (the inferred default)
-	bw.put_ue(15);     // log2_max_mv_length_horizontal (the inferred default)
-	bw.put_ue(15);     // log2_max_mv_length_vertical (the inferred default)
-	bw.put_ue(0);      // max_num_reorder_frames: no B-frames, nothing reorders
-	bw.put_ue(1);      // max_dec_frame_buffering: max_num_ref_frames above
+	bw.put_bits(p.colour_primaries, 8);
+	bw.put_bits(p.transfer_characteristics, 8);
+	bw.put_bits(p.matrix_coefficients, 8);
+	bw.put_bit(0); // chroma_loc_info_present_flag
+	bw.put_bit(0); // timing_info_present_flag
+	bw.put_bit(0); // nal_hrd_parameters_present_flag
+	bw.put_bit(0); // vcl_hrd_parameters_present_flag
+	bw.put_bit(0); // pic_struct_present_flag
+	bw.put_bit(1); // bitstream_restriction_flag
+	bw.put_bit(1); // motion_vectors_over_pic_boundaries_flag
+	bw.put_ue(2);  // max_bytes_per_pic_denom (the inferred default)
+	bw.put_ue(1);  // max_bits_per_mb_denom (the inferred default)
+	bw.put_ue(15); // log2_max_mv_length_horizontal (the inferred default)
+	bw.put_ue(15); // log2_max_mv_length_vertical (the inferred default)
+	bw.put_ue(0);  // max_num_reorder_frames: no B-frames, nothing reorders
+	bw.put_ue(1);  // max_dec_frame_buffering: max_num_ref_frames above
 	bw.rbsp_trailing_bits();
 	return bw.bytes();
 }

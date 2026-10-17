@@ -28,6 +28,9 @@ int g_failures = 0;
 		}                                                                                                    \
 	} while (0)
 
+// The matrix the current compare() calls run with.
+const wraith::YcbcrCoefficients *g_coefficients = &wraith::kBt601Coefficients;
+
 // Compares the two implementations over one frame size, filled by `fill`.
 void compare(const char *label, uint32_t width, uint32_t height, uint8_t (*fill)(size_t)) {
 	// A stride wider than the row, since the compositor's readback buffer is
@@ -44,9 +47,9 @@ void compare(const char *label, uint32_t width, uint32_t height, uint8_t (*fill)
 	std::vector<uint8_t> got(y_size + 2 * chroma, 0x55);
 
 	wraith::xrgb_to_i420_scalar(src.data(), width, height, stride, want.data(), want.data() + y_size,
-		want.data() + y_size + chroma);
+		want.data() + y_size + chroma, *g_coefficients);
 	wraith::xrgb_to_i420(src.data(), width, height, stride, got.data(), got.data() + y_size,
-		got.data() + y_size + chroma);
+		got.data() + y_size + chroma, *g_coefficients);
 
 	size_t diff = 0;
 	size_t first = 0;
@@ -82,11 +85,46 @@ uint8_t fill_saturated(size_t i) {
 	return (i % 3 == 0) ? 0xff : ((i % 3 == 1) ? 0x00 : 0x80);
 }
 
-} // namespace
+// One 2x2 block of a single colour through xrgb_to_i420(): its Y, U, V.
+void convert_colour(uint8_t r, uint8_t g, uint8_t b, const wraith::YcbcrCoefficients &k, uint8_t out[3]) {
+	uint8_t src[16];
+	for (int i = 0; i < 4; i++) {
+		src[i * 4 + 0] = b;
+		src[i * 4 + 1] = g;
+		src[i * 4 + 2] = r;
+		src[i * 4 + 3] = 0xff;
+	}
+	uint8_t y[4], u[1], v[1];
+	wraith::xrgb_to_i420(src, 2, 2, 8, y, u, v, k);
+	out[0] = y[0];
+	out[1] = u[0];
+	out[2] = v[0];
+}
 
-int main() {
-	printf("xrgb_convert_test: dispatching to \"%s\"\n", wraith::xrgb_to_i420_impl_name());
+// The coefficients themselves: studio range ends, grey without chroma, and
+// pure red's luma, which is where the two matrices differ most visibly.
+void check_values() {
+	for (const wraith::YcbcrCoefficients *k : {&wraith::kBt601Coefficients, &wraith::kBt709Coefficients}) {
+		uint8_t c[3];
+		convert_colour(0, 0, 0, *k, c);
+		CHECK(c[0] == 16 && c[1] == 128 && c[2] == 128);
+		convert_colour(255, 255, 255, *k, c);
+		CHECK(c[0] == 235 && c[1] == 128 && c[2] == 128);
+		convert_colour(128, 128, 128, *k, c);
+		CHECK(c[1] == 128 && c[2] == 128);
+		convert_colour(255, 0, 0, *k, c);
+		CHECK(c[2] == 240); // Cr's top, both matrices
+	}
+	uint8_t c[3];
+	convert_colour(255, 0, 0, wraith::kBt601Coefficients, c);
+	CHECK(c[0] == 82);
+	convert_colour(255, 0, 0, wraith::kBt709Coefficients, c);
+	CHECK(c[0] == 63);
+	convert_colour(0, 0, 255, wraith::kBt709Coefficients, c);
+	CHECK(c[0] == 32 && c[1] == 240);
+}
 
+void compare_all() {
 	// Real output sizes.
 	compare("gradient", 1920, 1080, fill_gradient);
 	compare("scattered", 1920, 1080, fill_scattered);
@@ -104,6 +142,17 @@ int main() {
 	compare("scattered", 1, 1, fill_scattered);
 	compare("saturated", 15, 15, fill_saturated);
 	compare("scattered", 64, 64, fill_scattered);
+}
+
+} // namespace
+
+int main() {
+	printf("xrgb_convert_test: dispatching to \"%s\"\n", wraith::xrgb_to_i420_impl_name());
+	check_values();
+	g_coefficients = &wraith::kBt601Coefficients;
+	compare_all();
+	g_coefficients = &wraith::kBt709Coefficients;
+	compare_all();
 
 	if (g_failures != 0) {
 		fprintf(stderr, "xrgb_convert_test: %d check(s) failed\n", g_failures);

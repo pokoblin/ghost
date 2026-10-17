@@ -252,7 +252,7 @@ bool VulkanDevice::can_import_native_frames(VkPhysicalDevice device, bool matche
 #endif
 }
 
-bool VulkanDevice::supports_pyrowave(VkPhysicalDevice device, const char **why) {
+bool VulkanDevice::supports_pyrowave(VkPhysicalDevice device, const char **why, bool sixteen_bit) {
 	auto fail = [why](const char *reason) {
 		if (why) {
 			*why = reason;
@@ -292,33 +292,36 @@ bool VulkanDevice::supports_pyrowave(VkPhysicalDevice device, const char **why) 
 		return fail("no timelineSemaphore");
 	}
 	// The decode target: one 3-plane 4:2:0 image, written plane by plane
-	// through R8 storage views and sampled whole through a ycbcr
+	// through R8 (R16) storage views and sampled whole through a ycbcr
 	// conversion with centred chroma.
+	const VkFormat image_format =
+		sixteen_bit ? VK_FORMAT_G16_B16_R16_3PLANE_420_UNORM : VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+	const VkFormat plane_format = sixteen_bit ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
 	VkFormatProperties fmt{};
-	vkGetPhysicalDeviceFormatProperties(device, VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM, &fmt);
+	vkGetPhysicalDeviceFormatProperties(device, image_format, &fmt);
 	VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
 		VK_FORMAT_FEATURE_MIDPOINT_CHROMA_SAMPLES_BIT |
 		VK_FORMAT_FEATURE_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT;
 	if ((fmt.optimalTilingFeatures & need) != need) {
 		return fail("the 3-plane 4:2:0 image format can't be sampled with a ycbcr conversion");
 	}
-	if (pyrowave_writes_planes_directly(device)) {
+	if (pyrowave_writes_planes_directly(device, image_format)) {
 		return true;
 	}
-	// The staged path: PyroWave writes three R8 images, which are copied
-	// into the planes of an image that is only sampled and copied to.
+	// The staged path: PyroWave writes three R8 (R16) images, which are
+	// copied into the planes of an image that is only sampled and copied to.
 	VkFormatProperties r8{};
-	vkGetPhysicalDeviceFormatProperties(device, VK_FORMAT_R8_UNORM, &r8);
+	vkGetPhysicalDeviceFormatProperties(device, plane_format, &r8);
 	VkFormatFeatureFlags r8_need = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
 	if ((r8.optimalTilingFeatures & r8_need) != r8_need) {
-		return fail("no R8 storage images to decode into");
+		return fail("no single-plane storage images to decode into");
 	}
 	if (!(fmt.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) {
 		return fail("the 3-plane 4:2:0 image can't be copied into");
 	}
 	VkPhysicalDeviceImageFormatInfo2 staged{};
 	staged.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
-	staged.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+	staged.format = image_format;
 	staged.type = VK_IMAGE_TYPE_2D;
 	staged.tiling = VK_IMAGE_TILING_OPTIMAL;
 	staged.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -330,10 +333,10 @@ bool VulkanDevice::supports_pyrowave(VkPhysicalDevice device, const char **why) 
 	return true;
 }
 
-bool VulkanDevice::pyrowave_writes_planes_directly(VkPhysicalDevice device) {
+bool VulkanDevice::pyrowave_writes_planes_directly(VkPhysicalDevice device, VkFormat image_format) {
 	VkPhysicalDeviceImageFormatInfo2 info{};
 	info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
-	info.format = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+	info.format = image_format;
 	info.type = VK_IMAGE_TYPE_2D;
 	info.tiling = VK_IMAGE_TILING_OPTIMAL;
 	info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;

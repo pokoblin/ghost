@@ -12,6 +12,12 @@
 // the frames here are as tall as the smallest output gdp-spec.md §7.2
 // allows.
 //
+// GBM's own linear pitch is width * 4 on Intel but 256-byte aligned on
+// radeonsi, where none of these frames would reach the driver probe. A few
+// frames are therefore laid out at width * 4 by hand inside a wider buffer,
+// so that the probe runs, and is checked, on every driver. A driver may
+// refuse such an import (radeonsi does); then can_import() must refuse too.
+//
 // Needs a render node with a VA-API H.264 encoder (WRAITH_TEST_RENDER_NODE,
 // default /dev/dri/renderD128); without one it skips (exit 77).
 #include "encode/vaapi/vaapi_h264_encoder.hpp"
@@ -51,7 +57,7 @@ public:
 		if (rgb == VA_INVALID_ID) {
 			return out;
 		}
-		VASurfaceID nv12 = convert_to_nv12(rgb);
+		VASurfaceID nv12 = convert_to_yuv(rgb);
 		vaDestroySurfaces(display_, &rgb, 1);
 		VAImage image = {};
 		if (nv12 == VA_INVALID_ID || vaDeriveImage(display_, nv12, &image) != VA_STATUS_SUCCESS) {
@@ -80,14 +86,16 @@ std::vector<uint8_t> random_pixels(uint32_t w, uint32_t h, uint32_t seed) {
 	return pixels;
 }
 
-// BT.601 studio range, as the VPP is asked for (convert_to_nv12()).
+// BT.601 studio range, as the VPP is asked for (convert_to_yuv(), 8-bit).
 int expected_luma(const uint8_t *bgrx) {
 	return 16 + (66 * bgrx[2] + 129 * bgrx[1] + 25 * bgrx[0] + 128) / 256;
 }
 
 // A `w` x `h` frame in an `alloc_w` wide buffer: a pitch other than GBM's
-// own choice for `w`.
-void check_width(gbm_device *gbm, int fd, uint32_t w, uint32_t alloc_w, uint32_t h) {
+// own choice for `w`. `pitch` lays the rows out that many bytes apart and
+// tells VA so, whatever pitch GBM picked (which must be at least that);
+// 0 uses GBM's.
+void check_width(gbm_device *gbm, int fd, uint32_t w, uint32_t alloc_w, uint32_t h, uint32_t pitch = 0) {
 	ImportProbe probe;
 	wraith::EncoderConfig config;
 	config.codec = gdp::VideoCodec::H264;
@@ -113,9 +121,21 @@ void check_width(gbm_device *gbm, int fd, uint32_t w, uint32_t alloc_w, uint32_t
 	auto *map =
 		static_cast<uint8_t *>(gbm_bo_map(bo, 0, 0, alloc_w, h, GBM_BO_TRANSFER_WRITE, &stride, &map_data));
 	CHECK(map != nullptr);
+	if (pitch == 0) {
+		pitch = stride;
+	} else if (pitch > stride) {
+		fprintf(stderr, "%u (in %u) x %u: GBM's pitch %u is under the %u asked for\n", w, alloc_w, h, stride,
+			pitch);
+		g_failures++;
+		if (map) {
+			gbm_bo_unmap(bo, map_data);
+		}
+		gbm_bo_destroy(bo);
+		return;
+	}
 	if (map) {
 		for (uint32_t y = 0; y < h; y++) {
-			memcpy(map + (size_t)y * stride, &pixels[(size_t)y * w * 4], (size_t)w * 4);
+			memcpy(map + (size_t)y * pitch, &pixels[(size_t)y * w * 4], (size_t)w * 4);
 		}
 		gbm_bo_unmap(bo, map_data);
 	}
@@ -127,11 +147,13 @@ void check_width(gbm_device *gbm, int fd, uint32_t w, uint32_t alloc_w, uint32_t
 	f.n_planes = 1;
 	f.fd[0] = gbm_bo_get_fd(bo);
 	f.offset[0] = gbm_bo_get_offset(bo, 0);
-	f.stride[0] = gbm_bo_get_stride(bo);
+	f.stride[0] = pitch;
 
 	if (map) {
 		std::vector<uint8_t> got = probe.luma(f);
-		CHECK(!got.empty());
+		// GBM's own layout must import; one laid out by hand may be
+		// refused, and an empty result then counts as not read right.
+		CHECK(!got.empty() || pitch != stride);
 		// Rounding differs between drivers by a step or two; a misread
 		// row is off by far more nearly everywhere.
 		size_t differ = 0;
@@ -186,6 +208,10 @@ int main() {
 			check_width(gbm, fd, 824, 832, kHeight); // 3328-byte pitch
 			check_width(gbm, fd, 824, 840, kHeight); // 3360
 			check_width(gbm, fd, 1920, 1920, kHeight);
+			// width * 4 by hand, so the driver probe runs on every driver.
+			check_width(gbm, fd, 808, 832, kHeight, 808 * 4); // 3232
+			check_width(gbm, fd, 824, 832, kHeight, 824 * 4); // 3296
+			check_width(gbm, fd, 856, 896, kHeight, 856 * 4); // 3424
 			result = g_failures ? 1 : 0;
 		}
 	}

@@ -11,9 +11,11 @@
 // they ride the same path as Vulkan Video's: refcounted AVFrames,
 // VideoImageSource::acquire_vulkan_frame(), FFmpeg's timeline-semaphore and
 // layout protocol. The images are one 3-plane 4:2:0 image each
-// (VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM), mutable so PyroWave can write each
-// plane through an R8 storage view, sampled whole through VideoImageSource's
-// I420 ycbcr sampler.
+// (VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM on an 8-bit session,
+// G16_B16_R16_3PLANE_420_UNORM on a 10-bit one -- the codec is float, so
+// the depth is only the precision the planes are written at), mutable so
+// PyroWave can write each plane through an R8/R16 storage view, sampled
+// whole through VideoImageSource's I420 / I420_16 ycbcr sampler.
 //
 // PyroWave records into a command buffer of ours (pyrowave_device_set_
 // command_buffer) between our own layout barriers, and we submit it on the
@@ -47,8 +49,9 @@ public:
 	PyrowaveDecode &operator=(const PyrowaveDecode &) = delete;
 
 	// `device` must outlive this object. False, logged, if PyroWave or
-	// FFmpeg won't take the device.
-	bool open(const VulkanDecodeDevice &device);
+	// FFmpeg won't take the device. `bit_depth` is the session's
+	// (OutputDescriptor.color, 8 or 10): 10 decodes into 16-bit planes.
+	bool open(const VulkanDecodeDevice &device, uint32_t bit_depth);
 	// Decodes one frame's bitstream into a new pool frame, referenced by
 	// `out` (which must be empty). False for a bitstream that doesn't parse
 	// or isn't a whole frame -- the caller reports the frame lost.
@@ -67,6 +70,13 @@ private:
 	AVBufferRef *hw_device_ = nullptr;
 	AVBufferRef *hw_frames_ = nullptr;
 	uint32_t width_ = 0, height_ = 0;
+	// The output image's formats for the session's depth: the 3-plane
+	// image, its per-plane storage view / the staged path's plain images,
+	// and FFmpeg's names for the pool.
+	VkFormat plane_format_ = VK_FORMAT_R8_UNORM;
+	VkFormat image_format_ = VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
+	int sw_format_ = 0;       // AVPixelFormat of the 3-plane image
+	int stage_sw_format_ = 0; // AVPixelFormat of one R8/R16 plane
 
 	// The staged path, for a GPU that can't write the planes of the output
 	// image in place (VulkanDevice::pyrowave_writes_planes_directly()):

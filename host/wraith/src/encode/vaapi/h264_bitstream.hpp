@@ -31,6 +31,11 @@ struct SpsParams {
 	uint32_t height_mb; // padded height in macroblocks
 	uint8_t level_idc;
 	uint8_t log2_max_frame_num_minus4;
+	// The VUI's colour description, H.273 code points (colour_description()
+	// in encode/colour_description.hpp). Studio range always.
+	uint8_t colour_primaries;
+	uint8_t transfer_characteristics;
+	uint8_t matrix_coefficients;
 };
 
 // profile_idc is fixed at 77 (Main): CAVLC-compatible, no chroma_format_idc

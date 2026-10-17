@@ -47,8 +47,11 @@ const std::vector<std::string> kDecoders = {"vulkan", "vaapi", "software"};
 // "microphone" are offered only on request (set_gamepad_forwarding(),
 // set_microphone()) -- see offered_capabilities(). The host only accepts
 // "gamepad" when it can actually create devices (wraith's
-// gdp_session.cpp), so what's in effect is exactly what works.
-const std::vector<std::string> kAlwaysOfferedCapabilities = {gdp::kCapabilityClipboard};
+// gdp_session.cpp), so what's in effect is exactly what works. "color" is
+// a promise this client keeps unconditionally: the presenter builds its
+// samplers from OutputDescriptor.color (VideoColor), whatever the matrix.
+const std::vector<std::string> kAlwaysOfferedCapabilities = {gdp::kCapabilityClipboard,
+	gdp::kCapabilityColor};
 
 // The one output spectre shows (see SessionClient::reassembler_).
 constexpr uint8_t kStreamId = 0;
@@ -78,12 +81,40 @@ std::string network_profile_name(gdp::session::NetworkProfile profile) {
 	}
 }
 
-DisplayInfo display_info(const gdp::session::DisplayDescriptor &d) {
+// OutputDescriptor -> DisplayInfo, the colour fields with the codec's
+// defaults where the host left one unspecified (gdp-spec.md §7.3's table):
+// BT.601 limited for the block codecs, BT.709 full for pyrowave, 8 bits.
+DisplayInfo display_info(const gdp::session::OutputDescriptor &output, const std::string &codec) {
+	const auto &d = output.display();
 	DisplayInfo display;
 	display.width = d.width();
 	display.height = d.height();
 	display.refresh_mhz = d.refresh_mhz();
 	display.scale = d.scale();
+
+	const bool pyrowave = codec == gdp::kVideoCodecPyrowave;
+	VideoColor &color = display.color;
+	color.matrix = pyrowave ? ColorMatrix::Bt709 : ColorMatrix::Bt601;
+	color.range = pyrowave ? ColorRange::Full : ColorRange::Limited;
+	color.bit_depth = 8;
+	if (!output.has_color()) {
+		return display;
+	}
+	const auto &c = output.color();
+	switch (c.matrix()) {
+	case gdp::session::COLOR_MATRIX_BT601: color.matrix = ColorMatrix::Bt601; break;
+	case gdp::session::COLOR_MATRIX_BT709: color.matrix = ColorMatrix::Bt709; break;
+	case gdp::session::COLOR_MATRIX_BT2020_NCL: color.matrix = ColorMatrix::Bt2020Ncl; break;
+	default: break; // unspecified: the default above
+	}
+	switch (c.range()) {
+	case gdp::session::COLOR_RANGE_LIMITED: color.range = ColorRange::Limited; break;
+	case gdp::session::COLOR_RANGE_FULL: color.range = ColorRange::Full; break;
+	default: break;
+	}
+	if (c.bit_depth() != 0) {
+		color.bit_depth = c.bit_depth();
+	}
 	return display;
 }
 
@@ -111,6 +142,26 @@ std::vector<std::string> SessionClient::offered_capabilities() const {
 
 void SessionClient::set_decodable_codecs(std::vector<std::string> codecs) {
 	offered_codecs_ = std::move(codecs);
+}
+
+void SessionClient::set_ten_bit_codecs(std::vector<std::string> codecs) {
+	ten_bit_codecs_ = std::move(codecs);
+}
+
+bool SessionClient::color_declared(const VideoColor &color) const {
+	// 8 bits is the baseline every client takes; anything deeper has to be
+	// in codec_formats for the session's codec. A matrix or range this
+	// build names is always applied (they aren't negotiated).
+	if (color.bit_depth == 8) {
+		return true;
+	}
+	bool declared = color.bit_depth == 10 &&
+		std::find(ten_bit_codecs_.begin(), ten_bit_codecs_.end(), session_codec_) != ten_bit_codecs_.end();
+	if (!declared) {
+		SLOG_ERROR("session_client: host describes %u-bit %s video, which this client never declared",
+			color.bit_depth, session_codec_.c_str());
+	}
+	return declared;
 }
 
 void SessionClient::set_preferred_codec(const std::string &codec) {
@@ -174,6 +225,17 @@ void SessionClient::on_connected() {
 	}
 	for (const auto &decoder : kDecoders) {
 		hello->add_decoders(decoder);
+	}
+	// gdp-spec.md §7.3: 10 bits per component, for the codecs the decoder
+	// probe said so of. Only for codecs actually offered -- a format for a
+	// codec not in `codecs` would be noise to the host.
+	for (const auto &codec : ten_bit_codecs_) {
+		if (std::find(offered_codecs_.begin(), offered_codecs_.end(), codec) == offered_codecs_.end()) {
+			continue;
+		}
+		auto *format = hello->add_codec_formats();
+		format->set_codec(codec);
+		format->add_bit_depths(10);
 	}
 	for (const auto &name : offered_capabilities()) {
 		hello->add_capabilities(name);
@@ -292,8 +354,16 @@ void SessionClient::handle_control_data(const uint8_t *data, size_t len) {
 			}
 		} else if (env.has_displays_changed()) {
 			const auto &changed = env.displays_changed();
-			if (changed.outputs_size() > 0 && on_displays_changed) {
-				on_displays_changed(display_info(changed.outputs(0).display()));
+			if (changed.outputs_size() > 0) {
+				DisplayInfo display = display_info(changed.outputs(0), session_codec_);
+				if (!color_declared(display.color)) {
+					disconnect("host switched to an undeclared video depth",
+						static_cast<uint64_t>(gdp::ErrorCode::kUnsupported));
+					return false;
+				}
+				if (on_displays_changed) {
+					on_displays_changed(display);
+				}
 			}
 		}
 		return true;
@@ -348,9 +418,15 @@ bool SessionClient::handle_accept(const gdp::session::ControlEnvelope &env) {
 	session.host_name = accept.host_name();
 	host_network_profile_ = network_profile_name(accept.network_profile());
 
+	session_codec_ = session.codec;
 	DisplayInfo display;
 	if (accept.outputs_size() > 0) {
-		display = display_info(accept.outputs(0).display());
+		display = display_info(accept.outputs(0), session_codec_);
+		if (!color_declared(display.color)) {
+			disconnect("host chose a video depth this client never declared",
+				static_cast<uint64_t>(gdp::ErrorCode::kUnsupported));
+			return false;
+		}
 	}
 
 	AudioInfo audio;

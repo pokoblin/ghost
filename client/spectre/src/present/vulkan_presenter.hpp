@@ -18,6 +18,7 @@
 
 #include "ui/draw_list.hpp"
 #include "ui/font.hpp"
+#include "video_color.hpp"
 
 #include "gdp/refine.hpp"
 
@@ -41,7 +42,15 @@ public:
 	// `drm_render_node` must be the same node Decoder::open() uses -- see
 	// VulkanDevice::init for how it selects the physical device. Also
 	// uploads the splash bitmap present_splash() draws (see its comment).
-	bool init(SDL_Window *window, const char *drm_render_node);
+	// `color` is the session's OutputDescriptor.color (gdp-spec.md §7.3):
+	// the matrix and range the video samplers convert with, and the depth
+	// whose image formats they are built for (video_image_source.hpp).
+	bool init(SDL_Window *window, const char *drm_render_node, const VideoColor &color);
+	// A DisplaysChanged with another colour description (a reopen that
+	// moved the depth): rebuilds the samplers and video pipelines for it,
+	// between presents. A description equal to the current one is a no-op.
+	// False, with failed() then true, if the rebuild didn't work.
+	bool set_color(const VideoColor &color);
 
 	// This device as the Vulkan Video decode backend needs it (Decoder's
 	// HardwareDecode::vulkan), or null when it can't decode -- see

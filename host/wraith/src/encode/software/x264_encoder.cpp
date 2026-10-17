@@ -5,6 +5,7 @@
 
 #include "util/clock.hpp"
 #include "util/log.hpp"
+#include "encode/colour_description.hpp"
 #include "encode/software/xrgb_convert.hpp"
 
 #include <algorithm>
@@ -61,13 +62,15 @@ bool X264Encoder::open(const EncoderConfig &config) {
 	// display such a stream. Revisit only alongside a client that negotiates
 	// software decode for it.
 	params_.i_csp = X264_CSP_I420;
-	// xrgb_to_i420() is BT.601 studio range; say so in the VUI, as the
-	// VA-API and NVENC encoders do, or decoders that guess (Firefox: BT.709
-	// for HD) shift every colour.
+	// xrgb_to_i420() converts with the session's matrix, studio range; say
+	// so in the VUI, as the VA-API and NVENC encoders do, or decoders that
+	// guess (Firefox: BT.709 for HD) shift every colour.
+	ColourDescription colour = colour_description(config.matrix);
+	coefficients_ = config.matrix == ColorMatrix::Bt709 ? &kBt709Coefficients : &kBt601Coefficients;
 	params_.vui.b_fullrange = 0;
-	params_.vui.i_colorprim = 6; // SMPTE 170M
-	params_.vui.i_transfer = 6;
-	params_.vui.i_colmatrix = 6;
+	params_.vui.i_colorprim = colour.primaries;
+	params_.vui.i_transfer = colour.transfer;
+	params_.vui.i_colmatrix = colour.matrix;
 	params_.i_fps_num = config.framerate_num;
 	params_.i_fps_den = config.framerate_den;
 	params_.b_vfr_input = 0;
@@ -204,7 +207,7 @@ bool X264Encoder::push_cpu(const uint8_t *data, uint32_t width, uint32_t height,
 		Slot &slot = slots_[next_slot_];
 		int64_t t0 = monotonic_now_us();
 		xrgb_to_i420(data, width, height, stride, slot.pic.img.plane[0], slot.pic.img.plane[1],
-			slot.pic.img.plane[2]);
+			slot.pic.img.plane[2], *coefficients_);
 		int64_t convert_us = monotonic_now_us() - t0;
 		{
 			std::unique_lock<std::mutex> lock(mutex_);
@@ -224,7 +227,8 @@ bool X264Encoder::push_cpu(const uint8_t *data, uint32_t width, uint32_t height,
 	}
 
 	int64_t t0 = monotonic_now_us();
-	xrgb_to_i420(data, width, height, stride, pic_.img.plane[0], pic_.img.plane[1], pic_.img.plane[2]);
+	xrgb_to_i420(data, width, height, stride, pic_.img.plane[0], pic_.img.plane[1], pic_.img.plane[2],
+		*coefficients_);
 	int64_t t1 = monotonic_now_us();
 
 	pic_.i_type = force_idr_next_ ? X264_TYPE_IDR : X264_TYPE_AUTO;

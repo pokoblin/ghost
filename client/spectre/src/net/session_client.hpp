@@ -17,6 +17,8 @@
 #include <atomic>
 #include <cstdint>
 #include <chrono>
+#include "video_color.hpp"
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -35,6 +37,12 @@ struct DisplayInfo {
 	uint32_t height = 0;
 	uint32_t refresh_mhz = 0;
 	double scale = 1.0;
+	// OutputDescriptor.color (gdp-spec.md §7.3), with the codec's defaults
+	// filled in where the host left a field unspecified. Checked against
+	// what SessionHello declared before it reaches on_accepted /
+	// on_displays_changed: a depth this client never offered ends the
+	// session (UNSUPPORTED) rather than reaching the decoder.
+	VideoColor color;
 };
 
 // From SessionAccept.audio (gdp-spec.md §6.8, §10). `valid` is false
@@ -88,6 +96,12 @@ public:
 	// (decode/codec_support.hpp). Must be called before connect() and before
 	// set_preferred_codec(); wraith's pick is only accepted from this list.
 	void set_decodable_codecs(std::vector<std::string> codecs);
+	// SessionHello.codec_formats (gdp-spec.md §7.3): the codecs among
+	// set_decodable_codecs()'s this client also decodes at 10 bits per
+	// component -- probe_decodable_codecs()'s `ten_bit`. The host may then
+	// answer with a 10-bit OutputDescriptor.color for one of them; it
+	// stays at 8 for the rest. Must be called before connect().
+	void set_ten_bit_codecs(std::vector<std::string> codecs);
 
 	// Moves `codec` (a gdp/video_codec.hpp wire token) to the front of
 	// SessionHello.codecs, ahead of the default order -- spectre -C. Must
@@ -350,6 +364,13 @@ private:
 	std::string presented_cert_sha256_; // what the host actually showed, for the mismatch report
 	// SessionHello.codecs in preference order, from set_decodable_codecs().
 	std::vector<std::string> offered_codecs_;
+	// SessionHello.codec_formats' 10-bit entries, from set_ten_bit_codecs().
+	std::vector<std::string> ten_bit_codecs_;
+	// The session's codec once accepted, for display_info()'s defaults.
+	std::string session_codec_;
+	// Whether OutputDescriptor.color stays within the declaration above
+	// (gdp-spec.md §7.3); logs what's wrong when it doesn't.
+	bool color_declared(const VideoColor &color) const;
 	// Empty unless set_preferred_codec() named one of offered_codecs_.
 	std::string preferred_codec_;
 	std::string network_profile_ = "auto";

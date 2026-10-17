@@ -67,7 +67,7 @@ std::unique_ptr<NvencRuntime> load_runtime() {
 	}
 	uint32_t built_version = (NVENCAPI_MAJOR_VERSION << 4) | NVENCAPI_MINOR_VERSION;
 	if (max_version < built_version) {
-		WLOG_INFO("nvenc: driver supports NVENC API %u.%u, wraith needs %u.%u (driver 530 or newer); "
+		WLOG_INFO("nvenc: driver supports NVENC API %u.%u, wraith needs %u.%u (driver 550.54 or newer); "
 				  "NVENC disabled",
 			max_version >> 4, max_version & 0xf, (unsigned)NVENCAPI_MAJOR_VERSION,
 			(unsigned)NVENCAPI_MINOR_VERSION);

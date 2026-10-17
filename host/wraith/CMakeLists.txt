@@ -168,6 +168,7 @@ add_executable(wraith
   src/session/path_rate_estimator.cpp
   src/session/leader_host.cpp
   src/session/clipboard_sync.cpp
+  src/session/file_receiver.cpp
   src/session/hid_evdev.cpp
   src/session/gamepad_evdev.cpp
   src/session/gamepad_devices.cpp
@@ -304,6 +305,16 @@ target_link_libraries(wraith_report_server_test PRIVATE gdp protobuf::libprotobu
 target_compile_options(wraith_report_server_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME wraith_report_server_test COMMAND wraith_report_server_test)
 
+# File transfer's host end (session/file_receiver.hpp): a real libgdp
+# client sends files over loopback into a private directory.
+add_executable(wraith_file_receiver_test tests/file_receiver_test.cpp src/session/file_receiver.cpp
+  src/util/config.cpp src/util/log.cpp)
+target_include_directories(wraith_file_receiver_test PRIVATE src)
+target_link_libraries(wraith_file_receiver_test PRIVATE gdp PkgConfig::WAYLAND_SERVER PkgConfig::TOMLPLUSPLUS
+  PkgConfig::LIBSYSTEMD Threads::Threads)
+target_compile_options(wraith_file_receiver_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME wraith_file_receiver_test COMMAND wraith_file_receiver_test)
+
 # The bitrate controller (session/rate_controller.hpp) against synthetic
 # reports. Links gdp for session.proto's NetworkProfile enum.
 add_executable(wraith_rate_controller_test tests/rate_controller_test.cpp src/session/rate_controller.cpp)
@@ -407,6 +418,14 @@ target_compile_definitions(wraith_config_test PRIVATE
   WRAITH_SHIPPED_CONFIG="${CMAKE_SOURCE_DIR}/packaging/config/wraith.toml")
 target_compile_options(wraith_config_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME wraith_config_test COMMAND wraith_config_test)
+
+# The hand-written HEVC and AV1 sequence headers at 8 and 10 bits
+# (docs/design/encoding.md): profile, depth fields, parsed back.
+add_executable(wraith_bitstream_test tests/bitstream_test.cpp src/encode/vaapi/nal_bitstream.cpp
+  src/encode/vaapi/hevc_bitstream.cpp src/encode/vaapi/av1_obu.cpp)
+target_include_directories(wraith_bitstream_test PRIVATE src)
+target_compile_options(wraith_bitstream_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME wraith_bitstream_test COMMAND wraith_bitstream_test)
 
 add_executable(wraith_xrgb_convert_test tests/xrgb_convert_test.cpp src/encode/software/xrgb_convert.cpp
   src/util/band_pool.cpp)

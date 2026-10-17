@@ -129,6 +129,19 @@ RTT comes from WebTransport's `getStats()`, or from `Ping`/`Pong` over a
 WebSocket. The browser measures the whole path itself and ignores
 `GatewayPath`.
 
+The page offers neither `color` nor 10 bits (gdp-spec.md §7.3), so it
+gets 8-bit BT.601 limited range, which renders exactly in every path
+tried. Chrome 154 on Linux (RX 9070 XT) converts by the stream's own
+colour description in software decode only: its VA-API path converts
+with BT.601 whatever the VUI says (a BT.709 red, coded 63/102/240, draws
+as 234,0,2, which is that YCbCr read as BT.601), and
+`VideoDecoderConfig.colorSpace` doesn't change it. Its software BT.709
+is off too (blue 243 for 255, 8-bit; red 231 for 255, 10-bit AV1), and
+10 bits even at BT.601 tints grey (127,128,126 for 128). Firefox, and
+Chrome on Windows and macOS, are untested; offering `color` or 10 bits
+would need each of them measured, and the page can't tell which decode
+path a browser takes.
+
 ## Limitations
 
 - Firefox's hardware decoder ignores an H.264/H.265 stream's crop: the

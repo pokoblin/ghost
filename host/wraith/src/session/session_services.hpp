@@ -67,7 +67,18 @@ public:
 	// (gdp-spec.md §7.8): the encoder is then
 	// wrapped in encode/refine/refine_encoder.hpp's decorator. A session
 	// without it gets the bare backend and none of refinement's costs.
-	bool set_session_codec(const std::string &codec_token, bool refine);
+	//
+	// `bit_depth` is the depth the session negotiated (gdp-spec.md §7.3,
+	// EncoderConfig::bit_depth): 8 or 10. Exact -- no backend opening at
+	// it is a false return, and the caller decides whether to try 8.
+	//
+	// `matrix` is the session's RGB -> YCbCr matrix
+	// (GdpSession::session_matrix(), EncoderConfig::matrix).
+	bool set_session_codec(const std::string &codec_token, bool refine, uint32_t bit_depth = 8,
+		ColorMatrix matrix = ColorMatrix::Bt601);
+	// The depth the open encoder codes at (what set_session_codec() last
+	// opened with): OutputDescriptor.color.bit_depth.
+	uint32_t session_bit_depth() const { return session_bit_depth_; }
 
 	// -e: encode every composited frame to the session codec (H.264 unless
 	// set_session_codec() said otherwise) appended to `output_path`. The dump is whatever the open encoder
@@ -286,6 +297,8 @@ private:
 	// session negotiates one.
 	gdp::VideoCodec session_codec_ = gdp::VideoCodec::H264;
 	bool session_refine_ = false;
+	uint32_t session_bit_depth_ = 8;
+	ColorMatrix session_matrix_ = ColorMatrix::Bt601;
 	FILE *encode_out_ = nullptr;
 	uint32_t encode_bitrate_bps_ = 80'000'000;
 	// Last set_bitrate() (0 before the first) and set_link_profile().

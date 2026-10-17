@@ -15,6 +15,7 @@
 #include "audio/microphone_capture.hpp"
 #include "audio/opus_decode.hpp"
 #include "audio/system_volume.hpp"
+#include "decode/codec_support.hpp"
 #include "decode/decoder.hpp"
 #include "gdp/gamepad.hpp"
 #include "input/raw_controller.hpp"
@@ -179,7 +180,10 @@ public:
 private:
 	// What SessionHello offers: what this client decodes, less pyrowave
 	// off a wired LAN (net/lan_link.hpp).
-	std::vector<std::string> offerable_codecs() const;
+	// What SessionHello offers (codecs, and the ones also decodable at 10
+	// bits), from the decoder probe and the pyrowave rules.
+	DecodableCodecs offerable_codecs() const;
+	static std::string describe_color(const VideoColor &color);
 	// The DiagnosticsRequest answer (gdp-spec.md §7.11): what this client
 	// ended up with, then its recent log.
 	std::string diagnostics_text() const;
@@ -440,7 +444,8 @@ private:
 	bool disconnected_ = false;
 	std::string disconnect_reason_;
 	SessionInfo session_info_;
-	std::vector<std::string> offered_codecs_; // what SessionHello offered
+	std::vector<std::string> offered_codecs_;  // what SessionHello offered
+	std::vector<std::string> offered_ten_bit_; // ... and which of them at 10 bits
 	DisplayInfo display_;
 	AudioInfo audio_info_;
 

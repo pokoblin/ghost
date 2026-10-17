@@ -3,6 +3,8 @@
 
 #include "encode/nvenc/nvenc_encoder.hpp"
 
+#include "encode/colour_description.hpp"
+
 #include "util/clock.hpp"
 #include "util/config.hpp"
 #include "util/log.hpp"
@@ -61,17 +63,20 @@ std::vector<GUID> session_codec_guids(const NvencRuntime *runtime, void *session
 // XRGB8888 is B,G,R,X in memory, which NVENC calls ARGB ("B in the lowest
 // 8 bits"); XBGR8888 is R,G,B,X, NVENC's ABGR.
 // NVENC converts the RGB input to YCbCr itself, with the matrix and range
-// the VUI names (BT.709 when it names none). spectre and the lossless tiles
-// are BT.601 studio range, so say so, or every colour shifts (see
-// VaapiEncoderBase::convert_to_nv12). AV1 states the same below.
-void set_bt601_vui(NV_ENC_CONFIG_H264_VUI_PARAMETERS &vui) {
+// the VUI names (BT.709 when it names none). So the VUI has to name the
+// session's matrix (EncoderConfig::matrix), studio range, or every colour
+// shifts against OutputDescriptor.color (see
+// VaapiEncoderBase::convert_to_yuv). AV1 states the same below. NVENC's
+// enums are H.273's code points, so colour_description() maps straight in.
+void set_vui(NV_ENC_CONFIG_H264_VUI_PARAMETERS &vui, ColorMatrix matrix) {
+	ColourDescription colour = colour_description(matrix);
 	vui.videoSignalTypePresentFlag = 1;
 	vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
 	vui.videoFullRangeFlag = 0;
 	vui.colourDescriptionPresentFlag = 1;
-	vui.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_SMPTE170M;
-	vui.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE170M;
-	vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M;
+	vui.colourPrimaries = (NV_ENC_VUI_COLOR_PRIMARIES)colour.primaries;
+	vui.transferCharacteristics = (NV_ENC_VUI_TRANSFER_CHARACTERISTIC)colour.transfer;
+	vui.colourMatrix = (NV_ENC_VUI_MATRIX_COEFFS)colour.matrix;
 }
 
 NV_ENC_BUFFER_FORMAT nvenc_format_from_drm(uint32_t drm_format) {
@@ -104,6 +109,13 @@ bool NvencEncoder::open(const EncoderConfig &config) {
 	if ((config_.width % 2) != 0 || (config_.height % 2) != 0) {
 		// 4:2:0 chroma, as in VaapiEncoderBase::open().
 		WLOG_ERROR("nvenc: width/height must be even (got %ux%u)", config_.width, config_.height);
+		return false;
+	}
+	// 10 bits is H.265 Main10 or AV1 from the same 8-bit ARGB input: SDK
+	// 12.2's inputBitDepth/outputBitDepth have NVENC widen it, as VA-API's
+	// VPP does into P010. H.264 stays 8 (encoder_factory.cpp).
+	if (config_.bit_depth != 8 && (config_.bit_depth != 10 || config_.codec == gdp::VideoCodec::H264)) {
+		WLOG_INFO("nvenc: no %u-bit %s encode", config_.bit_depth, gdp::video_codec_token(config_.codec));
 		return false;
 	}
 
@@ -142,8 +154,8 @@ bool NvencEncoder::open(const EncoderConfig &config) {
 
 	char device_name[128] = {};
 	runtime_->cu->cuDeviceGetName(device_name, sizeof(device_name), cu_device_);
-	WLOG_INFO("nvenc: %s on %s, %s input", gdp::video_codec_token(config_.codec), device_name,
-		importer_ ? "zero-copy dmabuf" : "CPU upload");
+	WLOG_INFO("nvenc: %u-bit %s on %s, %s input", config_.bit_depth, gdp::video_codec_token(config_.codec),
+		device_name, importer_ ? "zero-copy dmabuf" : "CPU upload");
 	force_idr_next_ = true;
 	return true;
 }
@@ -170,6 +182,21 @@ bool NvencEncoder::init_session() {
 		// only) or H.265: the session renegotiates down.
 		WLOG_INFO("nvenc: this GPU has no %s encoder", gdp::video_codec_token(config_.codec));
 		return false;
+	}
+	if (config_.bit_depth == 10) {
+		// The factory then tries the next row, and the session retries at 8.
+		NV_ENC_CAPS_PARAM caps = {};
+		caps.version = NV_ENC_CAPS_PARAM_VER;
+		caps.capsToQuery = NV_ENC_CAPS_SUPPORT_10BIT_ENCODE;
+		int supported = 0;
+		if (runtime_->api.nvEncGetEncodeCaps(session_, codec_guid_, &caps, &supported) != NV_ENC_SUCCESS ||
+			!supported) {
+			WLOG_INFO("nvenc: this GPU has no 10-bit %s encoder", gdp::video_codec_token(config_.codec));
+			return false;
+		}
+		if (config_.codec == gdp::VideoCodec::H265) {
+			guids.profile = NV_ENC_HEVC_PROFILE_MAIN10_GUID; // AV1's Main covers both depths
+		}
 	}
 
 	// P4 is the middle of NVENC's seven speed/quality presets and still
@@ -215,12 +242,14 @@ bool NvencEncoder::init_session() {
 		h264.idrPeriod = idr_period;
 		h264.repeatSPSPPS = 1;
 		h264.chromaFormatIDC = 1;
+		h264.inputBitDepth = NV_ENC_BIT_DEPTH_8;
+		h264.outputBitDepth = NV_ENC_BIT_DEPTH_8;
 		// VUI bitstream_restriction, so the stream says it never reorders
 		// (max_num_reorder_frames 0 with frameIntervalP 1). Without it a
 		// decoder may hold a full DPB before output -- Chrome's hardware
 		// decoders do, as with VaapiH264Encoder's SPS (h264_bitstream.cpp).
 		h264.h264VUIParameters.bitstreamRestrictionFlag = 1;
-		set_bt601_vui(h264.h264VUIParameters);
+		set_vui(h264.h264VUIParameters, config_.matrix);
 		break;
 	}
 	case gdp::VideoCodec::H265: {
@@ -228,8 +257,9 @@ bool NvencEncoder::init_session() {
 		hevc.idrPeriod = idr_period;
 		hevc.repeatSPSPPS = 1;
 		hevc.chromaFormatIDC = 1;
-		hevc.pixelBitDepthMinus8 = 0;
-		set_bt601_vui(hevc.hevcVUIParameters);
+		hevc.inputBitDepth = NV_ENC_BIT_DEPTH_8;
+		hevc.outputBitDepth = config_.bit_depth == 10 ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
+		set_vui(hevc.hevcVUIParameters, config_.matrix);
 		break;
 	}
 	case gdp::VideoCodec::AV1: {
@@ -237,12 +267,13 @@ bool NvencEncoder::init_session() {
 		av1.idrPeriod = idr_period;
 		av1.repeatSeqHdr = 1;
 		av1.chromaFormatIDC = 1;
-		av1.inputPixelBitDepthMinus8 = 0;
-		av1.pixelBitDepthMinus8 = 0;
+		av1.inputBitDepth = NV_ENC_BIT_DEPTH_8;
+		av1.outputBitDepth = config_.bit_depth == 10 ? NV_ENC_BIT_DEPTH_10 : NV_ENC_BIT_DEPTH_8;
 		av1.outputAnnexBFormat = 0; // low-overhead OBUs, as VaapiAv1Encoder
-		av1.colorPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_SMPTE170M;
-		av1.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE170M;
-		av1.matrixCoefficients = NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M;
+		ColourDescription colour = colour_description(config_.matrix);
+		av1.colorPrimaries = (NV_ENC_VUI_COLOR_PRIMARIES)colour.primaries;
+		av1.transferCharacteristics = (NV_ENC_VUI_TRANSFER_CHARACTERISTIC)colour.transfer;
+		av1.matrixCoefficients = (NV_ENC_VUI_MATRIX_COEFFS)colour.matrix;
 		av1.colorRange = 0;
 		break;
 	}

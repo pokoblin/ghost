@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "encode/vaapi/vaapi_av1_encoder.hpp"
+#include "encode/colour_description.hpp"
 #include "encode/vaapi/av1_obu.hpp"
 
 #include "util/log.hpp"
@@ -59,9 +60,9 @@ uint8_t pick_seq_level_idx(uint32_t width, uint32_t height, uint32_t fps_num, ui
 } // namespace
 
 VAProfile VaapiAv1Encoder::enc_profile() const {
-	// Profile 0: 4:2:0, 8 or 10 bit. The NV12 surfaces the shared VPP step
-	// produces are the 8-bit case, and it is the only AV1 profile radeonsi
-	// exposes an encode entrypoint for.
+	// Profile 0: 4:2:0, 8 or 10 bit -- the depth is a surface format
+	// (NV12 or P010, VaapiEncoderBase) and a header bit, not a profile.
+	// It is the only AV1 profile radeonsi exposes an encode entrypoint for.
 	return VAProfileAV1Profile0;
 }
 
@@ -85,6 +86,7 @@ bool VaapiAv1Encoder::init_codec() {
 		pick_seq_level_idx(padded_width_, padded_height_, config_.framerate_num, config_.framerate_den);
 
 	av1::SeqParams seq_params{};
+	seq_params.high_bitdepth = bit_depth() == 10;
 	seq_params.coded_width = padded_width_;
 	seq_params.coded_height = padded_height_;
 	seq_params.seq_level_idx = seq_level_idx_;
@@ -94,14 +96,14 @@ bool VaapiAv1Encoder::init_codec() {
 	// filter this hardware will pick parameters for unprompted, and a
 	// deblocked desktop reads better at the bitrates this streams at.
 	seq_params.enable_cdef = true;
-	// BT.601, studio range: what the shared VPP step produces (see
-	// convert_to_nv12() in vaapi_encoder_base.cpp) and what spectre
-	// converts back with. The H.264 SPS states it in its VUI; the H.265
-	// backend leaves it implicit (no VUI); AV1's sequence header has a
-	// colour description in it either way, so this one says what it means.
-	seq_params.color_primaries = 6;          // BT.601 / SMPTE 170M
-	seq_params.transfer_characteristics = 6; // BT.601 / SMPTE 170M
-	seq_params.matrix_coefficients = 6;      // BT.601 / SMPTE 170M
+	// The session's matrix, studio range: what the shared VPP step produces
+	// (convert_to_yuv() in vaapi_encoder_base.cpp) and what
+	// OutputDescriptor.color tells the client. H.264 and H.265 state the
+	// same in their VUI.
+	ColourDescription colour = colour_description(config_.matrix);
+	seq_params.color_primaries = colour.primaries;
+	seq_params.transfer_characteristics = colour.transfer;
+	seq_params.matrix_coefficients = colour.matrix;
 	seq_params.full_range = false;
 	sequence_obu_ = av1::build_sequence_header(seq_params);
 	temporal_delimiter_obu_ = av1::build_temporal_delimiter();
@@ -138,7 +140,7 @@ bool VaapiAv1Encoder::submit_frame(VASurfaceID surface, int64_t pts_us) {
 		seq.intra_period = idr_period_hint();
 		seq.ip_period = 1;
 		seq.bits_per_second = config_.bitrate_bps;
-		seq.seq_fields.bits.bit_depth_minus8 = 0;
+		seq.seq_fields.bits.bit_depth_minus8 = bit_depth() - 8;
 		seq.seq_fields.bits.subsampling_x = 1;
 		seq.seq_fields.bits.subsampling_y = 1;
 		seq.seq_fields.bits.mono_chrome = 0;

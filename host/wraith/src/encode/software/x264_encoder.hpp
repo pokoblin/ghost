@@ -44,6 +44,9 @@ private:
 	EncoderConfig config_;
 	x264_t *encoder_ = nullptr;
 	x264_param_t params_;
+	// xrgb_to_i420()'s coefficients for the session's matrix
+	// (EncoderConfig::matrix), set at open().
+	const struct YcbcrCoefficients *coefficients_ = nullptr;
 
 	// Synchronous mode's XRGB8888 -> I420 conversion buffer, sized once in
 	// open() and pointed to by pic_.img.plane[0..2]. Empty in asynchronous

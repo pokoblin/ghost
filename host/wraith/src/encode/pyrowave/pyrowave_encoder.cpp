@@ -100,6 +100,10 @@ bool PyrowaveEncoder::open(const EncoderConfig &config) {
 		WLOG_INFO("pyrowave: %ux%u is odd-sized; 4:2:0 needs even dimensions", config.width, config.height);
 		return false;
 	}
+	if (config.bit_depth != 8 && config.bit_depth != 10) {
+		WLOG_INFO("pyrowave: %u-bit is not a depth this encoder codes (8 or 10)", config.bit_depth);
+		return false;
+	}
 	if (!create_device(config.drm_fd) || !create_resources()) {
 		destroy();
 		return false;
@@ -118,8 +122,9 @@ bool PyrowaveEncoder::open(const EncoderConfig &config) {
 
 	VkPhysicalDeviceProperties props;
 	vkGetPhysicalDeviceProperties(physical_, &props);
-	WLOG_INFO("pyrowave: %ux%u 4:2:0 on %s, at most %.0f Mbit/s, %s", config.width, config.height,
-		props.deviceName, bitrate_bps_.load() / 1e6, dmabuf_import_ ? "dmabuf input" : "CPU frames only");
+	WLOG_INFO("pyrowave: %ux%u 4:2:0 at %u bits on %s, at most %.0f Mbit/s, %s", config.width, config.height,
+		config.bit_depth, props.deviceName, bitrate_bps_.load() / 1e6,
+		dmabuf_import_ ? "dmabuf input" : "CPU frames only");
 	return true;
 }
 
@@ -912,7 +917,12 @@ bool PyrowaveEncoder::encode_image(uint64_t signal_value, int64_t pts_us, std::v
 	// spectre's sampler for this codec expects.
 	scaled.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
 	scaled.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	scaled.intermediate_plane_format = VK_FORMAT_R8_UNORM;
+	// The codec is float; the depth is the precision of the planes it
+	// transforms. 8-bit planes are dithered (PyroWave's own), which the
+	// wavelet smooths; 16-bit ones carry the converted values exactly, so
+	// a 10-bit client's dark gradient comes back without the dither's
+	// grain either.
+	scaled.intermediate_plane_format = config_.bit_depth == 10 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
 	scaled.ycbcr_chroma_midpoint = 0.5f;
 
 	size_t budget = bitrate_bps_.load() * (uint64_t)config_.framerate_den /

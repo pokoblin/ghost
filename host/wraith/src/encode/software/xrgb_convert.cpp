@@ -23,7 +23,7 @@ inline uint8_t clamp_u8(int v) {
 } // namespace
 
 void xrgb_to_i420_scalar(const uint8_t *src, uint32_t width, uint32_t height, uint32_t src_stride,
-	uint8_t *y_plane, uint8_t *u_plane, uint8_t *v_plane) {
+	uint8_t *y_plane, uint8_t *u_plane, uint8_t *v_plane, const YcbcrCoefficients &k) {
 	for (uint32_t y = 0; y < height; y++) {
 		const uint8_t *row = src + (size_t)y * src_stride;
 		uint8_t *y_row = y_plane + (size_t)y * width;
@@ -32,7 +32,7 @@ void xrgb_to_i420_scalar(const uint8_t *src, uint32_t width, uint32_t height, ui
 			int b = row[x * 4 + 0];
 			int g = row[x * 4 + 1];
 			int r = row[x * 4 + 2];
-			y_row[x] = clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+			y_row[x] = clamp_u8(((k.yr * r + k.yg * g + k.yb * b + 128) >> 8) + 16);
 		}
 	}
 
@@ -47,8 +47,8 @@ void xrgb_to_i420_scalar(const uint8_t *src, uint32_t width, uint32_t height, ui
 			int b = row[x * 4 + 0];
 			int g = row[x * 4 + 1];
 			int r = row[x * 4 + 2];
-			u_row[cx] = clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-			v_row[cx] = clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+			u_row[cx] = clamp_u8(((k.ur * r + k.ug * g + k.ub * b + 128) >> 8) + 128);
+			v_row[cx] = clamp_u8(((k.vr * r + k.vg * g + k.vb * b + 128) >> 8) + 128);
 		}
 	}
 }
@@ -69,7 +69,8 @@ namespace {
 // than merely close -- lossless refinement compares source pixels against what the client
 // already has, and "close" would mean tiles that never stop being re-sent.
 __attribute__((target("avx2"))) static void xrgb_to_i420_avx2(const uint8_t *src, uint32_t width,
-	uint32_t height, uint32_t src_stride, uint8_t *y_plane, uint8_t *u_plane, uint8_t *v_plane) {
+	uint32_t height, uint32_t src_stride, uint8_t *y_plane, uint8_t *u_plane, uint8_t *v_plane,
+	const YcbcrCoefficients &k) {
 	const __m256i bs = _mm256_setr_epi8(WRAITH_CHAN(0), WRAITH_CHAN(0));
 	const __m256i gs = _mm256_setr_epi8(WRAITH_CHAN(1), WRAITH_CHAN(1));
 	const __m256i rs = _mm256_setr_epi8(WRAITH_CHAN(2), WRAITH_CHAN(2));
@@ -79,11 +80,12 @@ __attribute__((target("avx2"))) static void xrgb_to_i420_avx2(const uint8_t *src
 	// payload back down into the low 8 bytes.
 	const __m128i compact = _mm_setr_epi8(0, 1, 2, 3, 8, 9, 10, 11, -1, -1, -1, -1, -1, -1, -1, -1);
 
-	// Y stays in *unsigned* 16-bit: 66*255 + 129*255 + 25*255 + 128 = 56228,
-	// under 65536, so mullo/add need no widening and the shift is logical.
-	const __m256i c66 = _mm256_set1_epi16(66);
-	const __m256i c129 = _mm256_set1_epi16(129);
-	const __m256i c25 = _mm256_set1_epi16(25);
+	// Y stays in *unsigned* 16-bit: the coefficients sum to 220 for both
+	// matrices, and 220*255 + 128 = 56228 is under 65536, so mullo/add need
+	// no widening and the shift is logical.
+	const __m256i c_yr = _mm256_set1_epi16((short)k.yr);
+	const __m256i c_yg = _mm256_set1_epi16((short)k.yg);
+	const __m256i c_yb = _mm256_set1_epi16((short)k.yb);
 	const __m256i y_off = _mm256_set1_epi16(16);
 	for (uint32_t y = 0; y < height; y++) {
 		const uint8_t *row = src + (size_t)y * src_stride;
@@ -94,8 +96,8 @@ __attribute__((target("avx2"))) static void xrgb_to_i420_avx2(const uint8_t *src
 			__m256i b = _mm256_shuffle_epi8(px, bs);
 			__m256i g = _mm256_shuffle_epi8(px, gs);
 			__m256i r = _mm256_shuffle_epi8(px, rs);
-			__m256i a = _mm256_add_epi16(_mm256_mullo_epi16(r, c66), _mm256_mullo_epi16(g, c129));
-			a = _mm256_add_epi16(a, _mm256_mullo_epi16(b, c25));
+			__m256i a = _mm256_add_epi16(_mm256_mullo_epi16(r, c_yr), _mm256_mullo_epi16(g, c_yg));
+			a = _mm256_add_epi16(a, _mm256_mullo_epi16(b, c_yb));
 			a = _mm256_add_epi16(_mm256_srli_epi16(_mm256_add_epi16(a, bias), 8), y_off);
 			_mm_storel_epi64((__m128i *)(y_row + x),
 				_mm_shuffle_epi8(_mm_packus_epi16(_mm256_castsi256_si128(a), _mm256_extracti128_si256(a, 1)),
@@ -105,19 +107,19 @@ __attribute__((target("avx2"))) static void xrgb_to_i420_avx2(const uint8_t *src
 			int b = row[x * 4 + 0];
 			int g = row[x * 4 + 1];
 			int r = row[x * 4 + 2];
-			y_row[x] = clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+			y_row[x] = clamp_u8(((k.yr * r + k.yg * g + k.yb * b + 128) >> 8) + 16);
 		}
 	}
 
 	// U/V need *signed* 16-bit (negative coefficients) and an arithmetic
 	// shift. The result lands in 16..240 either way, so packus's unsigned
 	// saturation stands in for clamp_u8() without ever actually clamping.
-	const __m256i cu_r = _mm256_set1_epi16(-38);
-	const __m256i cu_g = _mm256_set1_epi16(-74);
-	const __m256i cu_b = _mm256_set1_epi16(112);
-	const __m256i cv_r = _mm256_set1_epi16(112);
-	const __m256i cv_g = _mm256_set1_epi16(-94);
-	const __m256i cv_b = _mm256_set1_epi16(-18);
+	const __m256i cu_r = _mm256_set1_epi16((short)k.ur);
+	const __m256i cu_g = _mm256_set1_epi16((short)k.ug);
+	const __m256i cu_b = _mm256_set1_epi16((short)k.ub);
+	const __m256i cv_r = _mm256_set1_epi16((short)k.vr);
+	const __m256i cv_g = _mm256_set1_epi16((short)k.vg);
+	const __m256i cv_b = _mm256_set1_epi16((short)k.vb);
 	// A pixel is exactly one dword, so "every other pixel" is a dword gather.
 	const __m256i even = _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6);
 	uint32_t chroma_width = (width + 1) / 2;
@@ -160,8 +162,8 @@ __attribute__((target("avx2"))) static void xrgb_to_i420_avx2(const uint8_t *src
 			int b = row[x * 4 + 0];
 			int g = row[x * 4 + 1];
 			int r = row[x * 4 + 2];
-			u_row[cx] = clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-			v_row[cx] = clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+			u_row[cx] = clamp_u8(((k.ur * r + k.ug * g + k.ub * b + 128) >> 8) + 128);
+			v_row[cx] = clamp_u8(((k.vr * r + k.vg * g + k.vb * b + 128) >> 8) + 128);
 		}
 	}
 }
@@ -182,14 +184,14 @@ bool have_avx2() {
 namespace {
 
 void convert_one(const uint8_t *src, uint32_t width, uint32_t height, uint32_t src_stride, uint8_t *y_plane,
-	uint8_t *u_plane, uint8_t *v_plane) {
+	uint8_t *u_plane, uint8_t *v_plane, const YcbcrCoefficients &k) {
 #if WRAITH_X86
 	if (have_avx2()) {
-		xrgb_to_i420_avx2(src, width, height, src_stride, y_plane, u_plane, v_plane);
+		xrgb_to_i420_avx2(src, width, height, src_stride, y_plane, u_plane, v_plane, k);
 		return;
 	}
 #endif
-	xrgb_to_i420_scalar(src, width, height, src_stride, y_plane, u_plane, v_plane);
+	xrgb_to_i420_scalar(src, width, height, src_stride, y_plane, u_plane, v_plane, k);
 }
 
 // Below this many rows a frame converts fast enough on one thread that
@@ -199,11 +201,11 @@ constexpr uint32_t kBandMinRows = 720;
 } // namespace
 
 void xrgb_to_i420(const uint8_t *src, uint32_t width, uint32_t height, uint32_t src_stride, uint8_t *y_plane,
-	uint8_t *u_plane, uint8_t *v_plane) {
+	uint8_t *u_plane, uint8_t *v_plane, const YcbcrCoefficients &k) {
 	BandPool &pool = BandPool::get();
 	size_t bands = pool.bands();
 	if (height < kBandMinRows || bands == 1) {
-		convert_one(src, width, height, src_stride, y_plane, u_plane, v_plane);
+		convert_one(src, width, height, src_stride, y_plane, u_plane, v_plane, k);
 		return;
 	}
 	// Bands start on even rows, so each covers whole chroma rows: rows
@@ -218,7 +220,7 @@ void xrgb_to_i420(const uint8_t *src, uint32_t width, uint32_t height, uint32_t 
 		}
 		uint32_t rows = std::min(band_rows, height - y0);
 		convert_one(src + (size_t)y0 * src_stride, width, rows, src_stride, y_plane + (size_t)y0 * width,
-			u_plane + (size_t)(y0 / 2) * chroma_width, v_plane + (size_t)(y0 / 2) * chroma_width);
+			u_plane + (size_t)(y0 / 2) * chroma_width, v_plane + (size_t)(y0 / 2) * chroma_width, k);
 	});
 }
 

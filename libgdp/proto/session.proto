@@ -173,10 +173,58 @@ enum ColorTransfer {
 // stream carries, so a peer that doesn't know the kind can refuse it
 // (reset with UNSUPPORTED) instead of misreading it. A kind is only used on
 // a session that negotiated the capability of the same name. Everything
-// after this frame is that kind's own protocol. No kind is defined yet.
+// after this frame is that kind's own protocol. Kinds: "file" (§7.12).
 message StreamOpen {
-  string kind = 1;     // lowercase token, like capabilities: e.g. "usb"
+  string kind = 1;     // lowercase token, like capabilities: e.g. "file"
   bytes params = 2;    // the kind's own opening parameters, if any
+}
+
+// --- File transfer (gdp-spec.md §7.12): the "file" capability and stream kind ---
+
+// StreamOpen.params of a "file" stream. Always opened by the client. A
+// host that gets a case it doesn't know replies
+// FileReply{refused{FILE_ERROR_UNSUPPORTED}}.
+message FileOpen {
+  oneof open {
+    FileOffer offer = 1;   // client -> host: here is a file
+    // 2 is reserved for a request (host -> client transfers).
+  }
+}
+
+message FileOffer {
+  string name = 1;              // the file's own name, no path; UTF-8, NFC (§7.12 for the rules)
+  uint64 size = 2;              // exactly this many raw bytes follow FileReply.accepted
+  int64 modified_unix_ms = 3;   // 0 = unknown; the receiver may give the file this mtime
+}
+
+// Every frame the receiver sends on a "file" stream, in its own direction.
+message FileReply {
+  oneof reply {
+    FileAccepted accepted = 1;  // send the bytes
+    FileError refused = 2;      // the offer is refused; FIN follows
+    FileSaved saved = 3;        // every byte written and the file in place; FIN follows
+    FileError failed = 4;       // accepted, then failed; FIN follows
+  }
+}
+
+message FileAccepted {}
+
+message FileSaved {
+  string name = 1;              // the name it was saved under: "name (1).ext" when the offered one was taken
+}
+
+message FileError {
+  FileErrorCode code = 1;
+}
+
+enum FileErrorCode {
+  FILE_ERROR_UNSPECIFIED = 0;
+  FILE_ERROR_UNSUPPORTED = 1;   // a FileOpen case the receiver doesn't know
+  FILE_ERROR_BAD_NAME = 2;      // the name breaks §7.12's rules
+  FILE_ERROR_NO_SPACE = 3;      // not enough free space, checked on accept or met while writing
+  FILE_ERROR_REFUSED = 4;       // the receiver's policy or its user said no
+  FILE_ERROR_WRITE_FAILED = 5;  // any other I/O error
+  FILE_ERROR_SIZE_MISMATCH = 6; // FIN before size bytes, or more than size
 }
 
 message AudioConfig {

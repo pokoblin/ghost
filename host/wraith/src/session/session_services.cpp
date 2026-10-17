@@ -71,22 +71,26 @@ uint32_t SessionServices::encode_bitrate_bps() const {
 	return (uint32_t)std::min(bps, (double)UINT32_MAX);
 }
 
-bool SessionServices::set_session_codec(const std::string &codec_token, bool refine) {
+bool SessionServices::set_session_codec(const std::string &codec_token, bool refine, uint32_t bit_depth,
+	ColorMatrix matrix) {
 	gdp::VideoCodec codec = gdp::video_codec_from_token(codec_token);
 	if (codec == gdp::VideoCodec::Unknown) {
 		WLOG_ERROR("encoder: negotiated codec \"%s\" is not one this build knows", codec_token.c_str());
 		return false;
 	}
-	if (encoder_ && codec == session_codec_ && refine == session_refine_) {
+	if (encoder_ && codec == session_codec_ && refine == session_refine_ && bit_depth == session_bit_depth_ &&
+		matrix == session_matrix_) {
 		return true;
 	}
 
 	// The encoder is opened before any client connects (start_encoder() /
 	// start_gdp_session()) and EncoderConfig is fixed at open() time, so
-	// a different codec or refine setting means closing it and opening a
-	// fresh one.
+	// a different codec, depth, matrix or refine setting means closing it
+	// and opening a fresh one.
 	session_codec_ = codec;
 	session_refine_ = refine;
+	session_bit_depth_ = bit_depth;
+	session_matrix_ = matrix;
 	close_encoder();
 	return ensure_encoder();
 }
@@ -105,6 +109,8 @@ bool SessionServices::ensure_encoder() {
 	config.framerate_den = 1;
 	config.gop_size = encode_gop_size_;
 	config.drm_fd = host_.render_drm_fd();
+	config.bit_depth = session_bit_depth_;
+	config.matrix = session_matrix_;
 
 	// Backend selection -- the hardware backends (VA-API, NVENC) in table
 	// order, the software fallback, and what -F does to them -- lives in

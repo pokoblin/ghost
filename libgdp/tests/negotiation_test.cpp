@@ -43,6 +43,29 @@ int main() {
 	assert(gdp::negotiate_capabilities({}, {"a"}).empty());
 	assert(gdp::negotiate_capabilities({"a"}, {}).empty());
 
+	// Bit depth (gdp-spec.md §7.3): 10 only when the client declared it for
+	// the session's codec; 8 is the baseline and never needs declaring.
+	using Formats = std::vector<gdp::CodecFormat>;
+	const Formats none;
+	const Formats h265_only = {{"h265", {10}}};
+	const Formats mixed = {{"h264", {}}, {"h265", {10, 12}}, {"av1", {10}}};
+	assert(gdp::declares_bit_depth(none, "h265", 8));
+	assert(!gdp::declares_bit_depth(none, "h265", 10));
+	assert(gdp::declares_bit_depth(h265_only, "h265", 10));
+	assert(!gdp::declares_bit_depth(h265_only, "av1", 10));
+	assert(!gdp::declares_bit_depth(h265_only, "h265", 12));
+	assert(gdp::declares_bit_depth(mixed, "av1", 10));
+	assert(gdp::declares_bit_depth(mixed, "h265", 12));
+	assert(!gdp::declares_bit_depth(mixed, "h264", 10));
+	// The host asks for its preference order; a codec the client holds at
+	// 8 bits (no entry, or an entry without 10) stays at 8.
+	assert(gdp::negotiate_bit_depth(mixed, "h265", {10, 8}) == 10);
+	assert(gdp::negotiate_bit_depth(mixed, "h264", {10, 8}) == 8);
+	assert(gdp::negotiate_bit_depth(none, "h265", {10, 8}) == 8);
+	assert(gdp::negotiate_bit_depth(mixed, "h265", {8}) == 8); // [encode] bit_depth = 8
+	assert(gdp::negotiate_bit_depth(mixed, "h265", {12, 10, 8}) == 12);
+	assert(gdp::negotiate_bit_depth(mixed, "h265", {}) == 8);
+
 	// Error-code text: known codes get words, unknown ones stay numeric so
 	// a newer peer's code is still visible in the log.
 	assert(gdp::describe_error_code(static_cast<uint64_t>(gdp::ErrorCode::kAuthFailed)) ==

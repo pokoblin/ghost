@@ -233,32 +233,44 @@ int StreamSession::run() {
 
 // --- run() steps ---
 
-std::vector<std::string> StreamSession::offerable_codecs() const {
-	std::vector<std::string> codecs = probe_decodable_codecs(options_.decoder, kDrmRenderNode);
+DecodableCodecs StreamSession::offerable_codecs() const {
+	DecodableCodecs offer = probe_decodable_codecs(options_.decoder, kDrmRenderNode);
+	std::vector<std::string> &codecs = offer.codecs;
 	// pyrowave only on a wired LAN of 1 Gbit/s or more (gdp-spec.md §6.6),
 	// unless asked for by name. It leads gdp's token order, so offering it
-	// at all offers it first.
+	// at all offers it first. (Its 10-bit entry, if any, stays in
+	// `ten_bit`; SessionClient only declares depths for codecs offered.)
 	auto pyrowave = std::find(codecs.begin(), codecs.end(), gdp::kVideoCodecPyrowave);
 	if (pyrowave == codecs.end()) {
 		SLOG_INFO("spectre: not offering pyrowave: this client can't decode it (see vulkan_device above)");
-		return codecs;
+		return offer;
 	}
 	if (options_.preferred_codec == gdp::kVideoCodecPyrowave) {
 		SLOG_INFO("spectre: offering pyrowave (-C pyrowave)");
-		return codecs;
+		return offer;
 	}
 	if (!options_.allow_pyrowave) {
 		codecs.erase(pyrowave);
-		return codecs;
+		return offer;
 	}
 	LanLink link = probe_lan_link(options_.host, options_.port);
 	if (!link.qualifies) {
 		SLOG_INFO("spectre: not offering pyrowave: %s", link.description.c_str());
 		codecs.erase(pyrowave);
-		return codecs;
+		return offer;
 	}
 	SLOG_INFO("spectre: offering pyrowave first: %s", link.description.c_str());
-	return codecs;
+	return offer;
+}
+
+// The stats overlay's colour line: depth, matrix, range, subsampling (the
+// last is always 4:2:0, gdp-spec.md §7.3).
+std::string StreamSession::describe_color(const VideoColor &color) {
+	std::string matrix = color.matrix == ColorMatrix::Bt601 ? "BT.601"
+		: color.matrix == ColorMatrix::Bt709                ? "BT.709"
+															: "BT.2020";
+	return std::to_string(color.bit_depth) + "-bit " + matrix +
+		(color.range == ColorRange::Full ? " full" : " limited") + " 4:2:0";
 }
 
 std::string StreamSession::diagnostics_text() const {
@@ -273,8 +285,9 @@ std::string StreamSession::diagnostics_text() const {
 	std::string text = "spectre diagnostics\n";
 	text += "platform: " + std::string(SDL_GetPlatform()) + "\n";
 	text += "host: " + options_.host + ":" + std::to_string(options_.port) + "\n";
-	text += "offered codecs: " + join(offered_codecs_) + "\n";
-	text += "session codec: " + session_info_.codec + " (host encoder: " + session_info_.encoder + ")\n";
+	text += "offered codecs: " + join(offered_codecs_) + " (10-bit: " + join(offered_ten_bit_) + ")\n";
+	text += "session codec: " + session_info_.codec + " at " + std::to_string(display_.color.bit_depth) +
+		" bits (host encoder: " + session_info_.encoder + ")\n";
 	text += "capabilities: " + join(session_info_.capabilities) + "\n";
 	text += std::string("decoder: ") + decoder_.backend_name() + "\n";
 	if (window_) {
@@ -299,8 +312,11 @@ std::string StreamSession::diagnostics_text() const {
 
 bool StreamSession::connect_and_wait_for_accept() {
 	client_.set_requested_display(options_.requested_width, options_.requested_height);
-	offered_codecs_ = offerable_codecs();
+	DecodableCodecs offer = offerable_codecs();
+	offered_codecs_ = offer.codecs;
+	offered_ten_bit_ = offer.ten_bit;
 	client_.set_decodable_codecs(offered_codecs_);
+	client_.set_ten_bit_codecs(offered_ten_bit_);
 	if (!options_.preferred_codec.empty()) {
 		client_.set_preferred_codec(options_.preferred_codec);
 	}
@@ -422,7 +438,9 @@ bool StreamSession::open_window() {
 	}
 #endif
 
-	if (!presenter_.init(window_, kDrmRenderNode)) {
+	// The samplers are built for the colour description SessionAccept
+	// carried (display_.color): matrix, range and the depth's formats.
+	if (!presenter_.init(window_, kDrmRenderNode, display_.color)) {
 		SLOG_ERROR("spectre: VulkanPresenter::init failed");
 		return false;
 	}
@@ -448,6 +466,7 @@ bool StreamSession::open_window() {
 	hw.backend = options_.decoder;
 	hw.vulkan = presenter_.decode_device();
 	hw.compute = presenter_.compute_device();
+	hw.bit_depth = display_.color.bit_depth;
 #if defined(__APPLE__)
 	// VideoToolbox frames are copied in, not imported: nothing to check.
 	hw.native_importable = true;
@@ -502,6 +521,7 @@ bool StreamSession::open_window() {
 	stats_sample_.width = display_.width;
 	stats_sample_.height = display_.height;
 	stats_sample_.codec = session_info_.codec;
+	stats_sample_.color = describe_color(display_.color);
 	stats_sample_.encoder = session_info_.encoder;
 	stats_sample_.network_profile = client_.network_profile();
 	stats_sample_.decoder = decoder_.backend_name();
@@ -526,7 +546,6 @@ void StreamSession::open_audio() {
 		client_.on_audio_frame = [this](uint16_t seq, uint32_t pts, const uint8_t *data, size_t len) {
 			jitter_buffer_->push(seq, pts, data, len);
 		};
-		stats_sample_.audio = true;
 		SLOG_INFO("spectre: audio %s, %u Hz, %u ch, %ums frames", audio_info_.codec.c_str(),
 			audio_info_.sample_rate_hz, audio_info_.channels, audio_info_.frame_ms);
 	} else {
@@ -626,6 +645,37 @@ void StreamSession::on_accepted(const SessionInfo &session, const DisplayInfo &d
 
 void StreamSession::on_displays_changed(const DisplayInfo &display) {
 	constexpr uint64_t kToastUs = 3000000;
+	if (display.color != display_.color) {
+		// The host reopened its encoder with another depth (or matrix):
+		// the samplers follow (VulkanPresenter::set_color). PyroWave's
+		// decoder is sized by its planes' depth too; the next keyframe
+		// reopens it through the ordinary path only for FFmpeg codecs, so
+		// a pyrowave session reopens the decoder here.
+		SLOG_INFO("spectre: host video now %u-bit (was %u-bit)", display.color.bit_depth,
+			display_.color.bit_depth);
+		display_.color = display.color;
+		stats_sample_.color = describe_color(display_.color);
+		if (!presenter_.set_color(display_.color)) {
+			SLOG_ERROR("spectre: presenter can't follow the new colour description, ending session");
+			presenter_failed_ = true;
+			running_ = false;
+			return;
+		}
+		if (session_info_.codec == gdp::kVideoCodecPyrowave) {
+			bool refine = gdp::has_capability(session_info_.capabilities, gdp::kCapabilityRefine);
+			HardwareDecode hw;
+			hw.backend = options_.decoder;
+			hw.compute = presenter_.compute_device();
+			hw.bit_depth = display_.color.bit_depth;
+			decoder_.close();
+			if (!decoder_.open(session_info_.codec, refine, hw)) {
+				SLOG_ERROR("spectre: reopening the pyrowave decoder at %u bits failed, ending session",
+					display_.color.bit_depth);
+				running_ = false;
+				return;
+			}
+		}
+	}
 	bool changed = display.width != display_.width || display.height != display_.height;
 	if (changed) {
 		SLOG_INFO("spectre: host output now %ux%u (was %ux%u)", display.width, display.height, display_.width,

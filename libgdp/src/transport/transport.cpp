@@ -57,11 +57,12 @@ Stream::Stream(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {
 
 Stream::~Stream() {
 	impl_->self = nullptr;
-	// Dropping a stream on its own aborts it.
+	// Dropping a stream on its own aborts it, unless it is an additional
+	// stream whose own direction is finished (stream_release()).
 	// Not when its whole connection is going: that close covers it.
 	auto conn = impl_->conn.lock();
 	if (conn && conn->self) {
-		impl_->core->loop.post([conn, id = impl_->id]() { conn->stream_abort(id); });
+		impl_->core->loop.post([conn, id = impl_->id]() { conn->stream_release(id); });
 	}
 }
 
@@ -86,11 +87,23 @@ void Stream::send(const uint8_t *data, size_t len, bool fin) {
 }
 
 void Stream::close() {
+	reset(0);
+}
+
+void Stream::reset(uint64_t error_code) {
 	auto conn = impl_->conn.lock();
 	if (!conn) {
 		return;
 	}
-	impl_->core->loop.post([conn, id = impl_->id]() { conn->stream_abort(id); });
+	impl_->core->loop.post([conn, id = impl_->id, error_code]() { conn->stream_abort(id, error_code); });
+}
+
+void Stream::consume(size_t len) {
+	auto conn = impl_->conn.lock();
+	if (!conn || len == 0 || !is_additional_stream(impl_->id)) {
+		return;
+	}
+	impl_->core->loop.post([conn, id = impl_->id, len]() { conn->stream_consume(id, len); });
 }
 
 // --- Connection ---
@@ -198,6 +211,23 @@ Stream *Connection::open_input_stream() {
 		return nullptr;
 	}
 	return open_client_stream(impl_.get(), impl_->input_stream, 4);
+}
+
+std::unique_ptr<Stream> Connection::open_stream() {
+	if (impl_->is_server || !impl_->input_stream) {
+		return nullptr;
+	}
+	std::unique_ptr<Stream> stream;
+	open_client_stream(impl_.get(), stream, impl_->next_stream_id);
+	impl_->next_stream_id += 4;
+	return stream;
+}
+
+void Connection::allow_streams(uint32_t count) {
+	if (!impl_->is_server || count == 0) {
+		return;
+	}
+	impl_->core->loop.post([conn = impl_, count]() { conn->allow_streams(count); });
 }
 
 bool Connection::send_datagram(const uint8_t *data, size_t len, bool priority) {

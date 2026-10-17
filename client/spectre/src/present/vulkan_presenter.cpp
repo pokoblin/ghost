@@ -84,6 +84,7 @@ struct VulkanPresenter::Impl {
 	~Impl();
 	bool create_video_pipelines();
 	bool create_video_pipeline(VideoFormat format, VideoPipeline *out);
+	void destroy_video_pipelines();
 	bool do_present(AVFrame *frame);
 };
 
@@ -92,15 +93,20 @@ VulkanPresenter::Impl::~Impl() {
 		av_frame_free(&last_frame);
 	}
 	device.wait_idle();
+	destroy_video_pipelines();
+	// overlay, lossless, video_source, then device are destroyed by the
+	// compiler in that (reverse-declaration) order.
+}
+
+void VulkanPresenter::Impl::destroy_video_pipelines() {
 	VkDevice dev = device.device();
 	for (VideoPipeline &v : video) {
 		if (v.pipeline) vkDestroyPipeline(dev, v.pipeline, nullptr);
 		if (v.layout) vkDestroyPipelineLayout(dev, v.layout, nullptr);
 		if (v.pool) vkDestroyDescriptorPool(dev, v.pool, nullptr);
 		if (v.set_layout) vkDestroyDescriptorSetLayout(dev, v.set_layout, nullptr);
+		v = VideoPipeline{};
 	}
-	// overlay, lossless, video_source, then device are destroyed by the
-	// compiler in that (reverse-declaration) order.
 }
 
 bool VulkanPresenter::Impl::create_video_pipelines() {
@@ -197,6 +203,8 @@ bool VulkanPresenter::Impl::do_present(AVFrame *frame) {
 		return false;
 	}
 	VkDevice dev = device.device();
+	// (The Nv12 slot is only a stand-in for the splash: nothing is drawn
+	// with it, so it needn't exist on a 10-bit session.)
 	const VideoPipeline &vp = video[(int)(has_frame ? video_source.format() : VideoFormat::Nv12)];
 	if (has_frame && vp.pipeline == VK_NULL_HANDLE) {
 		SLOG_ERROR("vulkan_presenter: no pipeline for the frame's format");
@@ -452,22 +460,50 @@ bool VulkanPresenter::Impl::do_present(AVFrame *frame) {
 VulkanPresenter::VulkanPresenter() : impl_(std::make_unique<Impl>()) {}
 VulkanPresenter::~VulkanPresenter() = default;
 
-bool VulkanPresenter::init(SDL_Window *window, const char *drm_render_node) {
-	return impl_->device.init(window, drm_render_node) && impl_->video_source.init(impl_->device) &&
+bool VulkanPresenter::init(SDL_Window *window, const char *drm_render_node, const VideoColor &color) {
+	return impl_->device.init(window, drm_render_node) && impl_->video_source.init(impl_->device, color) &&
 		impl_->create_video_pipelines() && impl_->lossless.init(impl_->device) &&
 		impl_->overlay.init(impl_->device) &&
 		impl_->overlay.set_splash_bitmap(kSplashWidth, kSplashHeight, kSplashBitmapBgra);
 }
 
+bool VulkanPresenter::set_color(const VideoColor &color) {
+	if (impl_->failed || impl_->video_source.color() == color) {
+		return !impl_->failed;
+	}
+	// The samplers are immutable in the pipelines' set layouts, so a new
+	// matrix, range or depth is new samplers and new pipelines. Nothing is
+	// in flight between presents (one frame in flight, waited for), and
+	// the cached last frame is of the old stream: drop it rather than
+	// redraw it through the wrong sampler.
+	impl_->device.wait_idle();
+	if (impl_->last_frame) {
+		av_frame_free(&impl_->last_frame);
+	}
+	impl_->destroy_video_pipelines();
+	impl_->video_source.shutdown();
+	if (!impl_->video_source.init(impl_->device, color) || !impl_->create_video_pipelines()) {
+		SLOG_ERROR("vulkan_presenter: rebuilding the video pipelines for the new colour description failed");
+		impl_->failed = true;
+		return false;
+	}
+	return true;
+}
+
 const VulkanDecodeDevice *VulkanPresenter::compute_device() const {
-	// No I420 pipeline means nothing PyroWave decoded could be drawn.
-	return impl_->video_source.supports(VideoFormat::I420) ? impl_->device.compute_device() : nullptr;
+	// No 3-plane pipeline (of the session's depth) means nothing PyroWave
+	// decoded could be drawn.
+	bool drawable =
+		impl_->video_source.supports(VideoFormat::I420) || impl_->video_source.supports(VideoFormat::I420_16);
+	return drawable ? impl_->device.compute_device() : nullptr;
 }
 
 const VulkanDecodeDevice *VulkanPresenter::decode_device() const {
-	// No NV12 pipeline (Windows, on a device without the ycbcr conversion)
-	// means nothing Vulkan decode produced could be drawn.
-	return impl_->video_source.supports(VideoFormat::Nv12) ? impl_->device.decode_device() : nullptr;
+	// No 2-plane pipeline (Windows, on a device without the ycbcr
+	// conversion) means nothing Vulkan decode produced could be drawn.
+	bool drawable =
+		impl_->video_source.supports(VideoFormat::Nv12) || impl_->video_source.supports(VideoFormat::P010);
+	return drawable ? impl_->device.decode_device() : nullptr;
 }
 
 uint32_t VulkanPresenter::vendor_id() const {

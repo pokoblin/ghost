@@ -59,12 +59,22 @@
 // compute decode hands its frames over the same way, as 3-plane I420
 // images (pyrowave_decode.hpp).
 //
-// Every frame is one of three formats (VideoFormat) and each format has
+// Every frame is one of a few formats (VideoFormat) and each format has
 // its own sampler -- owned here, since it's what makes the views of one
 // format interchangeable -- and its own pipeline in VulkanPresenter.
+//
+// 10-bit sessions (OutputDescriptor.color.bit_depth, gdp-spec.md §7.3)
+// take the same paths with the 10-bit formats: VA-API and Vulkan Video
+// frames come as P010 (VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16),
+// VideoToolbox's as P010 pixel buffers copied into a P010 staging image,
+// D3D11VA's as P010 textures the video processor converts to a 10-bit RGB
+// (R10G10B10A2) shared texture, PyroWave's as 16-bit 3-plane images. The
+// ycbcr samplers normalise to float, so the shader is the same, and it
+// dithers down to the 8-bit swapchain (video.frag).
 #pragma once
 
 #include "present/vulkan_device.hpp"
+#include "video_color.hpp"
 
 #include <cstdint>
 
@@ -84,18 +94,22 @@ struct AVD3D11VADeviceContext;
 
 namespace spectre {
 
-// The image formats a frame can reach the video pipeline in: NV12 through a
-// ycbcr-conversion sampler, BGRA through a plain one (Windows' D3D11VA
-// and software paths -- see the file comment), or 3-plane I420 through a
-// ycbcr sampler of its own -- PyroWave's compute decode
-// (pyrowave_decode.hpp), which writes the planes separately and is
-// full-range BT.709 where everything else is studio-range BT.601.
+// The image formats a frame can reach the video pipeline in: NV12 (P010
+// at 10 bits) through a ycbcr-conversion sampler, RGB through a plain one
+// (Windows' D3D11VA and software paths -- see the file comment; BGRA8 or
+// R10G10B10A2, the pipeline doesn't care), or 3-plane I420 (16-bit planes
+// at 10 bits) through a ycbcr sampler of its own -- PyroWave's compute
+// decode (pyrowave_decode.hpp), which writes the planes separately. The
+// matrix and range of each ycbcr sampler come from the session's
+// VideoColor (init()); the host says what it sent (gdp-spec.md §7.3).
 enum class VideoFormat {
 	Nv12,
 	Bgra,
 	I420,
+	P010,
+	I420_16,
 };
-constexpr int kVideoFormatCount = 3;
+constexpr int kVideoFormatCount = 5;
 
 class VideoImageSource {
 public:
@@ -104,15 +118,27 @@ public:
 	VideoImageSource(const VideoImageSource &) = delete;
 	VideoImageSource &operator=(const VideoImageSource &) = delete;
 
-	// Creates the samplers (and the ycbcr conversion behind the NV12 one).
-	// `device` must outlive this object.
-	bool init(VulkanDevice &device);
+	// Creates the samplers (and the ycbcr conversions behind the planar
+	// ones) for the session's colour description: its matrix and range go
+	// into every ycbcr conversion, its depth decides which planar formats
+	// get a sampler at all (NV12/I420 at 8, P010/I420_16 at 10 -- a 10-bit
+	// session's frames are only ever 10-bit, and vice versa). `device` must
+	// outlive this object.
+	bool init(VulkanDevice &device, const VideoColor &color);
+	// What init() was given.
+	const VideoColor &color() const { return color_; }
+	// Drops everything init() and the frames since made -- samplers,
+	// conversions, the staging image and shared texture -- so init() can
+	// run again with another VideoColor (a DisplaysChanged that moved the
+	// depth). Only between presents, with the queue idle.
+	void shutdown();
 
 	// Whether frames can ever arrive in `format` on this build and device --
-	// the formats VulkanPresenter builds a pipeline for. NV12 always on
-	// Linux and macOS; on Windows BGRA always, NV12 when the ycbcr sampler
-	// could be made (needed only by Vulkan Video decode); I420 wherever its
-	// sampler could be made (PyroWave).
+	// the formats VulkanPresenter builds a pipeline for. NV12 (P010 on a
+	// 10-bit session) always on Linux and macOS; on Windows BGRA always,
+	// NV12/P010 when the ycbcr sampler could be made (needed only by
+	// Vulkan Video decode); I420 (I420_16) wherever its sampler could be
+	// made (PyroWave).
 	bool supports(VideoFormat format) const { return sampler_[(int)format] != VK_NULL_HANDLE; }
 	// The immutable sampler `format`'s descriptor set layout must be built
 	// with (a ycbcr-conversion sampler can't be bound any other way), and
@@ -127,9 +153,10 @@ public:
 	// Imports, converts, uploads, or just views `frame` (see the file
 	// comment for which). On success view() is valid until release().
 	// `frame` must be AV_PIX_FMT_VAAPI, AV_PIX_FMT_D3D11,
-	// AV_PIX_FMT_VIDEOTOOLBOX or AV_PIX_FMT_VULKAN (NV12 internally -- true
-	// of every profile wraith's FFmpeg-decoded encoders use -- or PyroWave's
-	// I420), or AV_PIX_FMT_YUV420P (software and V4L2 decode).
+	// AV_PIX_FMT_VIDEOTOOLBOX or AV_PIX_FMT_VULKAN (NV12 or P010 internally
+	// -- true of every profile wraith's FFmpeg-decoded encoders use -- or
+	// PyroWave's I420 / 16-bit I420), or AV_PIX_FMT_YUV420P (software and
+	// V4L2 decode, always 8-bit).
 	bool acquire(AVFrame *frame);
 	VkImageView view() const { return current_view_; }
 	// The acquired frame's format -- which pipeline draws it.
@@ -181,8 +208,23 @@ private:
 		Vulkan,
 	};
 
-	bool create_nv12_sampler();
-	bool create_i420_sampler();
+	// A ycbcr-conversion sampler over `format` with the session's matrix
+	// and range, `chroma_location` for both axes, into sampler_[slot] (and
+	// its descriptor count); the conversion goes to `*conversion`.
+	bool create_ycbcr_sampler(VideoFormat slot, VkFormat format, VkChromaLocation chroma_location,
+		VkSamplerYcbcrConversion *conversion, const char *what);
+	// The two-plane format (NV12/P010) and the three-plane one
+	// (I420/I420_16) of the session's depth, and the VideoFormat slot each
+	// belongs to.
+	VkFormat two_plane_format() const;
+	VkFormat three_plane_format() const;
+	VideoFormat two_plane_slot() const {
+		return color_.bit_depth > 8 ? VideoFormat::P010 : VideoFormat::Nv12;
+	}
+	VideoFormat three_plane_slot() const {
+		return color_.bit_depth > 8 ? VideoFormat::I420_16 : VideoFormat::I420;
+	}
+	void destroy_samplers();
 
 	bool acquire_vulkan_frame(AVFrame *frame);
 	void release_vulkan_frame();
@@ -197,7 +239,9 @@ private:
 	void destroy_imported(Imported *imported);
 #endif
 
-	bool ensure_software_image(uint32_t width, uint32_t height);
+	// `format` is the staging image's: the platform's video format
+	// (kVideoFormat) for software decode, P010 for 10-bit VideoToolbox.
+	bool ensure_software_image(uint32_t width, uint32_t height, VkFormat format);
 	void destroy_software_image();
 	bool upload_software_frame(AVFrame *frame);
 #ifdef __APPLE__
@@ -211,9 +255,13 @@ private:
 #endif
 
 	VulkanDevice *dev_ = nullptr;
+	VideoColor color_;
 
 	VkSampler sampler_[kVideoFormatCount] = {};
-	uint32_t descriptor_count_[kVideoFormatCount] = {1, 1, 1};
+	uint32_t descriptor_count_[kVideoFormatCount] = {1, 1, 1, 1, 1};
+	// The two-plane (NV12 or P010) and three-plane (I420 or 16-bit I420)
+	// conversions of the session's depth; the other depth's slots stay
+	// empty.
 	VkSamplerYcbcrConversion ycbcr_conversion_ = VK_NULL_HANDLE;
 	VkSamplerYcbcrConversion i420_conversion_ = VK_NULL_HANDLE;
 
@@ -255,6 +303,9 @@ private:
 	OwnedImage hw_image_;
 	uint32_t hw_width_ = 0;
 	uint32_t hw_height_ = 0;
+	// Whether the shared texture is R10G10B10A2 (a 10-bit session whose
+	// video processor can write it) rather than BGRA8.
+	bool hw_ten_bit_ = false;
 #endif
 
 	// The upload target for AV_PIX_FMT_YUV420P frames (software and V4L2
@@ -269,6 +320,7 @@ private:
 	VkSubresourceLayout sw_planes_[2] = {};
 	uint32_t sw_image_width_ = 0;
 	uint32_t sw_image_height_ = 0;
+	VkFormat sw_image_format_ = VK_FORMAT_UNDEFINED;
 };
 
 } // namespace spectre

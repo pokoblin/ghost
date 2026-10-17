@@ -489,8 +489,16 @@ void ScreencastHost::deliver_dmabuf(const DmabufFrame &frame, void *token, int64
 	bool importable = session_->can_import(frame);
 	if (!importable && !unimportable_logged_) {
 		unimportable_logged_ = true;
-		WLOG_INFO("screencast: the encoder can't import a %dx%d dmabuf with a %u-byte pitch; reading it back",
-			frame.width, frame.height, frame.stride[0]);
+		if (ensure_reader()) {
+			WLOG_INFO(
+				"screencast: the encoder can't import a %dx%d dmabuf with a %u-byte pitch; reading it back",
+				frame.width, frame.height, frame.stride[0]);
+		} else {
+			WLOG_ERROR(
+				"screencast: the encoder can't import a %dx%d dmabuf with a %u-byte pitch and there is "
+				"no dmabuf read-back; importing it anyway, the picture may be wrong",
+				frame.width, frame.height, frame.stride[0]);
+		}
 	}
 	if (importable && session_->wants_tiled_dmabuf() && ensure_reader() && tile_source_) {
 		// readback_ lags the frame being encoded from here on: a later

@@ -23,14 +23,23 @@
 
 namespace spectre {
 
-// gdp's codec tokens, in its preference order, narrowed to those at least
-// one of the decoders Decoder::open() would try for `backend` (spectre -X)
-// can decode here: Vulkan Video, the platform's own, V4L2 (Linux),
-// PyroWave's compute decode, or -- for h264 only -- FFmpeg software.
+// What SessionHello offers: gdp's codec tokens, in its preference order,
+// narrowed to those at least one of the decoders Decoder::open() would
+// try for `backend` (spectre -X) can decode here -- Vulkan Video, the
+// platform's own, V4L2 (Linux), PyroWave's compute decode, or, for h264
+// only, FFmpeg software -- and, of those, the ones a hardware path also
+// decodes at 10 bits per component (gdp-spec.md §7.3's codec_formats):
+// Main10 / AV1 10-bit profiles on the GPU, PyroWave into 16-bit planes.
+// Software decode never counts for `ten_bit` (it would cost half again
+// the CPU and a 16-bit upload for nothing), nor does V4L2.
+struct DecodableCodecs {
+	std::vector<std::string> codecs;
+	std::vector<std::string> ten_bit; // a subset of `codecs`
+};
 // `drm_render_node` is the node VulkanPresenter::init() will get (Linux
-// only). h264 in software is always there, so the list is never empty;
-// with -X software it is exactly h264.
-std::vector<std::string> probe_decodable_codecs(DecodeBackend backend, const char *drm_render_node);
+// only). h264 in software is always there, so `codecs` is never empty;
+// with -X software it is exactly h264, and `ten_bit` is empty.
+DecodableCodecs probe_decodable_codecs(DecodeBackend backend, const char *drm_render_node);
 
 // Every decode path that works here, as "<path>:<codec>" -- "vulkan:av1",
 // "vaapi:h264", "compute:pyrowave", "software:h264" -- for spectre

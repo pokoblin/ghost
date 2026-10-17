@@ -89,7 +89,7 @@ own UI and the cursor. `VulkanPresenter` is the façade the stream
 session talks to.
 
 Each platform lands every decode path on one image format, so there is
-one sampler and one pipeline:
+one sampler and one pipeline (two of each where PyroWave is in):
 
 - **Linux** stays planar: `VK_FORMAT_G8_B8R8_2PLANE_420_UNORM` with a
   `VK_KHR_sampler_ycbcr_conversion` sampler doing NV12 to RGB in sampling
@@ -122,6 +122,27 @@ one sampler and one pipeline:
   VideoToolbox frame is copied, not imported: MoltenVK 1.4.2 can't import
   CoreVideo's NV12 IOSurfaces. The copy is one pass over the frame
   (shared memory).
+- **10-bit sessions** (gdp-spec.md §7.3, [encoding](encoding.md#bit-depth))
+  take the same paths with the 10-bit formats: VA-API and Vulkan Video
+  frames as P010 (`G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16`),
+  VideoToolbox's as P010 pixel buffers, D3D11VA's as P010 textures the
+  video processor converts to R10G10B10A2 (BGRA8 where it can't write
+  that), PyroWave's as 16-bit 3-plane images. `codec_support.cpp` probes
+  each path's 10-bit profile before `SessionHello` declares it; software
+  decode never does. The samplers are built from `OutputDescriptor.color`
+  (`VideoColor`: matrix, range, depth), not from the codec, which is
+  what spectre's `color` capability promises (gdp-spec.md §7.3) and what
+  lets the host use BT.709. A `DisplaysChanged` with another description
+  rebuilds them
+  (`VulkanPresenter::set_color()`; verified on RADV by a resize that
+  dropped a session from 10 to 8 bits, colours exact on both sides of
+  it). The swapchain stays 8-bit:
+  `video.frag` adds half an LSB of per-pixel noise before the rounding,
+  which turns a 10-bit gradient's steps into a scatter the eye averages
+  and leaves 8-bit sources exactly as they were. A 10-bit swapchain
+  (`A2B10G10R10`) would make the dither unnecessary, but only where the
+  compositor and panel are 10-bit too; it is left for HDR, which needs
+  one anyway.
 - **Vulkan Video** has nothing to import. `acquire()` makes a
   sampling-only view of FFmpeg's `VkImage` (FFmpeg's storage and decode
   usages can't be on a ycbcr view) and follows FFmpeg's `AVVkFrame`
@@ -179,7 +200,9 @@ decode, presentation and audio together and captures input.
   session is over when wraith closes with `SESSION_ENDED`, shown as
   "logged out". The toolbar offers the mutes (as glyphs), capture mouse,
   fullscreen (not in kiosk mode) and End session as buttons. The statistics panel shows
-  resolution and codec, encoder and decoder backends (labelled hardware
+  resolution with the stream's depth, matrix and range
+  (`OutputDescriptor.color`), the codec with its encoder backend and the
+  decoder backend (labelled hardware
   or software), decoded fps, decode and present time, QUIC RTT, frames
   lost of the trailing 64, video Mb/s and a latency bar (green at 0 ms
   to red at 100 ms of decode plus present).

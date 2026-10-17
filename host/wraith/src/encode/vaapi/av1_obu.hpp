@@ -65,6 +65,9 @@ inline constexpr uint8_t kPrimaryRefNone = 7;
 inline constexpr int kRefsPerFrame = 7;
 
 struct SeqParams {
+	// color_config()'s high_bitdepth: 10-bit samples rather than 8. Profile
+	// 0 covers both, so this one bit is the whole difference in the header.
+	bool high_bitdepth;
 	// The *coded* picture size, which is what max_frame_width/height carry.
 	// The displayable size is stated per frame as a render size instead --
 	// see FrameHeaderParams.
@@ -73,10 +76,8 @@ struct SeqParams {
 	uint8_t seq_level_idx;
 	uint8_t order_hint_bits; // 1..8
 	bool enable_cdef;
-	// Written into color_config() as a colour description. Unlike the
-	// H.264/H.265 backends -- which write no VUI at all and leave the
-	// BT.601 convention implicit -- AV1's sequence header has nowhere
-	// cheaper to put this, so the stream says what it is.
+	// Written into color_config() as a colour description, H.273 code
+	// points (encode/colour_description.hpp), as the H.264/H.265 VUI do.
 	uint8_t color_primaries;
 	uint8_t transfer_characteristics;
 	uint8_t matrix_coefficients;

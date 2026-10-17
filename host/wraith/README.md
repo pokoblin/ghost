@@ -17,7 +17,8 @@ client. From there it:
 - **feeds the client back in**: keyboard and pointer into the compositor
   (libei, or the wlroots virtual pointer/keyboard), gamepads as uinput
   devices, the microphone as a PipeWire source, text clipboard both
-  ways, and the compositor's cursor out as metadata rather than pixels;
+  ways, files sent from the client into the download directory, and the
+  compositor's cursor out as metadata rather than pixels;
 - **owns the session's lifetime**: the leader process, logout, and
   reporting to ghostd when the desktop ends.
 
@@ -28,6 +29,7 @@ How it works is in [docs/design/](../../docs/design/):
 [refinement](../../docs/design/refinement.md),
 [transport and rate control](../../docs/design/transport-and-rate-control.md),
 [clipboard](../../docs/design/clipboard.md),
+[file transfer](../../docs/design/file-transfer.md),
 [audio, cursor and gamepads](../../docs/design/audio-cursor-gamepad.md),
 and [login and sessions](../../docs/design/login-and-sessions.md) for
 how ghostd starts it. Its settings file is described in

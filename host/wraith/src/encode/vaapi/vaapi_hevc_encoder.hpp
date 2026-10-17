@@ -16,6 +16,11 @@
 // (VAConfigAttribEncHEVCBlockSizes), because HEVC hardware genuinely
 // differs there -- radeonsi, for instance, supports exactly one CTB size --
 // and whether it takes P slices at all (see p_as_gpb_).
+//
+// Main at 8 bits, Main10 at 10 (EncoderConfig::bit_depth): the profile,
+// the VA sequence parameters' depth fields and the packed VPS/SPS all
+// follow bit_depth(); the QP fields don't (slice QP is an index, and
+// QpBdOffset is the decoder's business).
 #pragma once
 
 #include "encode/vaapi/vaapi_encoder_base.hpp"
@@ -30,7 +35,7 @@ public:
 	VAProfile enc_profile() const override;
 
 protected:
-	const char *enc_profile_name() const override { return "HEVCMain"; }
+	const char *enc_profile_name() const override { return bit_depth() == 10 ? "HEVCMain10" : "HEVCMain"; }
 	// 64 is the largest coding tree block H.265 allows, so a 64-aligned
 	// frame is a whole number of CTBs on any hardware. Padding only to
 	// the 8-px minimum coding block instead would be legal, but radeonsi

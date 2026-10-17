@@ -42,4 +42,31 @@ bool has_capability(const std::vector<std::string> &negotiated, const std::strin
 	return contains(negotiated, name);
 }
 
+bool declares_bit_depth(const std::vector<CodecFormat> &declared, const std::string &codec,
+	uint32_t bit_depth) {
+	if (bit_depth == 8) {
+		return true; // the baseline, gdp-spec.md §7.3
+	}
+	for (const CodecFormat &format : declared) {
+		if (format.codec != codec) {
+			continue;
+		}
+		if (std::find(format.bit_depths.begin(), format.bit_depths.end(), bit_depth) !=
+			format.bit_depths.end()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+uint32_t negotiate_bit_depth(const std::vector<CodecFormat> &declared, const std::string &codec,
+	const std::vector<uint32_t> &wanted) {
+	for (uint32_t depth : wanted) {
+		if (declares_bit_depth(declared, codec, depth)) {
+			return depth;
+		}
+	}
+	return 8;
+}
+
 } // namespace gdp

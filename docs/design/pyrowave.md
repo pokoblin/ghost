@@ -54,7 +54,11 @@ render node.
 node's GPU, with every feature the GPU offers enabled, lent to PyroWave
 through `pyrowave_create_device`. Frames go into one optimal BGRA image,
 and a worker thread runs PyroWave's scaled encode, which also does the
-RGB→YCbCr conversion on the GPU (full-range BT.709). Two ways in:
+RGB→YCbCr conversion on the GPU (full-range BT.709). The codec is float,
+so a session's bit depth ([encoding](encoding.md#bit-depth)) is only the
+precision of the planes it transforms: an 8-bit session uses PyroWave's
+dithered `R8_UNORM` intermediate, a 10-bit one `R16_UNORM`, which every
+Vulkan GPU can, so the factory's row says 10. Two ways in:
 
 - **`push()`** takes a dmabuf, imports it as a `VkImage`
   (`VK_EXT_image_drm_format_modifier`, cached per buffer) and copies it
@@ -84,7 +88,10 @@ spectre decodes on the presenter's own device
 (`VulkanDevice::compute_device()`, which also enables the features
 PyroWave's shaders use) into frames from an FFmpeg Vulkan pool of 3-plane
 4:2:0 images (`G8_B8_R8_3PLANE_420_UNORM`, mutable so PyroWave writes
-each plane through an R8 storage view). They take the same
+each plane through an R8 storage view; on a 10-bit session
+`G16_B16_R16_3PLANE_420_UNORM` written through R16 views, which spectre
+declares only where `supports_pyrowave(..., sixteen_bit)` passes). They
+take the same
 `AV_PIX_FMT_VULKAN` path as Vulkan Video's frames, sampled with their own
 full-range BT.709 conversion. PyroWave records into spectre's command
 buffer, and spectre submits it on the presenter queue, waiting on and

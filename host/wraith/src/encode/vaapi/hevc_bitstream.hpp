@@ -44,6 +44,9 @@ inline constexpr uint8_t kNalSps = 33;
 inline constexpr uint8_t kNalPps = 34;
 
 struct SpsParams {
+	// 8 (Main) or 10 (Main10): bit_depth_luma/chroma_minus8 and the
+	// profile_tier_level() in both the VPS and the SPS follow from it.
+	uint8_t bit_depth;
 	uint32_t width_px;     // display width (post-cropping)
 	uint32_t height_px;    // display height (post-cropping)
 	uint32_t coded_width;  // pic_width_in_luma_samples (min-CB aligned)
@@ -63,12 +66,22 @@ struct SpsParams {
 	bool sao_enabled;
 	bool temporal_mvp_enabled;
 	bool strong_intra_smoothing_enabled;
+	// The VUI's colour description, H.273 code points (colour_description()
+	// in encode/colour_description.hpp). Studio range always.
+	uint8_t colour_primaries;
+	uint8_t transfer_characteristics;
+	uint8_t matrix_coefficients;
 };
 
-// profile_idc is fixed at 1 (Main): 8-bit 4:2:0, which is exactly what the
-// VPP conversion in vaapi_encoder_base.cpp produces, and the only HEVC
-// profile every hardware decoder implements.
-std::vector<uint8_t> build_vps(uint8_t level_idc);
+// general_profile_idc for a bit depth: 1 (Main) at 8 bits, 2 (Main10) at
+// 10 -- both 4:2:0, which is what the VPP conversion in
+// vaapi_encoder_base.cpp produces at either depth. Main10 decoders take
+// Main streams, not the other way round, which is why the depth is
+// negotiated (gdp-spec.md §7.3) rather than assumed.
+uint8_t profile_idc_for_bit_depth(uint8_t bit_depth);
+// The VPS carries the same profile_tier_level() as the SPS, so it takes
+// the same depth.
+std::vector<uint8_t> build_vps(uint8_t level_idc, uint8_t bit_depth);
 std::vector<uint8_t> build_sps(const SpsParams &params);
 
 // cu_qp_delta_enabled_flag is fixed at 1: the driver's rate control
