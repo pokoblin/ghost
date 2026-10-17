@@ -40,6 +40,10 @@ public:
 		// Already-open EIS fd -- ei_setup_backend_fd takes ownership of
 		// it; the caller must not close it itself, on success or failure.
 		int eis_fd = -1;
+		// The compositor keeps only whole notches of a discrete scroll
+		// (mutter: meta-eis-client.c's handle_scroll_discrete), so
+		// fractions go out as a scroll delta instead (inject_axis).
+		bool discrete_scroll_whole_notches_only = false;
 	};
 
 	// Sets up an ei sender context on config.eis_fd. False on any
