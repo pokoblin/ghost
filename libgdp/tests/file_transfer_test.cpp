@@ -139,12 +139,62 @@ void test_reader() {
 	}
 }
 
+void test_copied_files() {
+	using V = std::vector<std::string>;
+	assert(gdp::select_copied_files_mime({"text/plain", "text/uri-list", "x-special/gnome-copied-files"}) ==
+		"x-special/gnome-copied-files");
+	assert(gdp::select_copied_files_mime({"UTF8_STRING", "text/uri-list"}) == "text/uri-list");
+	assert(gdp::select_copied_files_mime({"text/plain"}).empty());
+
+	// Nautilus: the action first, then one URI a line, percent-encoded.
+	assert((gdp::copied_file_paths("x-special/gnome-copied-files",
+				"copy\nfile:///home/dws/a.txt\nfile:///home/dws/My%20Files/%E2%9C%93.pdf") ==
+		V{"/home/dws/a.txt", "/home/dws/My Files/\xe2\x9c\x93.pdf"}));
+	assert((gdp::copied_file_paths("x-special/gnome-copied-files", "cut\nfile:///tmp/x\n") == V{"/tmp/x"}));
+	// RFC 2483: CRLF, comments; localhost is local, other hosts and schemes aren't.
+	assert((gdp::copied_file_paths("text/uri-list",
+				"# a comment\r\nfile:///a\r\nfile://localhost/b\r\nfile://other/c\r\nhttps://x/y\r\n") ==
+		V{"/a", "/b"}));
+	// A first line that is a URI counts in a URI list, not in GNOME's format.
+	assert((gdp::copied_file_paths("text/uri-list", "file:///only") == V{"/only"}));
+	assert(gdp::copied_file_paths("x-special/gnome-copied-files", "file:///only").empty());
+	// No NULs in a path, malformed escapes kept as they are, other formats nothing.
+	assert(gdp::copied_file_paths("text/uri-list", "file:///a%00b").empty());
+	assert((gdp::copied_file_paths("text/uri-list", "file:///100%zz") == V{"/100%zz"}));
+	assert(gdp::copied_file_paths("text/plain", "file:///a").empty());
+}
+
+void test_frame_then_raw() {
+	using State = gdp::FrameThenRawReader::State;
+	gdp::session::FileReply reply;
+	reply.mutable_sending()->set_name("a.txt");
+	reply.mutable_sending()->set_size(3);
+	std::vector<uint8_t> bytes;
+	assert(gdp::encode_frame(reply, &bytes));
+	size_t frame_size = bytes.size();
+	bytes.insert(bytes.end(), {7, 8, 9});
+	gdp::FrameThenRawReader reader(1024);
+	assert(reader.feed(bytes.data(), frame_size - 1) == State::kWaiting);
+	assert(reader.feed(bytes.data() + frame_size - 1, 2) == State::kFramed);
+	gdp::session::FileReply parsed;
+	assert(parsed.ParseFromString(reader.frame()) && parsed.sending().name() == "a.txt");
+	assert((reader.take_data() == std::vector<uint8_t>{7}));
+	reader.feed(bytes.data() + frame_size + 1, 2);
+	assert((reader.take_data() == std::vector<uint8_t>{8, 9}));
+
+	gdp::FrameThenRawReader small(4);
+	assert(small.feed(bytes.data(), bytes.size()) == State::kError);
+	assert(small.error_code() == static_cast<uint64_t>(gdp::ErrorCode::kFrameTooLarge));
+}
+
 } // namespace
 
 int main() {
 	test_valid_file_name();
 	test_numbered_file_name();
 	test_reader();
+	test_copied_files();
+	test_frame_then_raw();
 	printf("file_transfer_test: all checks passed\n");
 	return 0;
 }

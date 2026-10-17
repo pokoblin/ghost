@@ -331,8 +331,9 @@ ConfigLoad load_config(const std::string &path) {
 		}
 	}
 
-	const toml::table *files = reader.section(root, "files", {"receive", "directory"});
+	const toml::table *files = reader.section(root, "files", {"receive", "send", "directory"});
 	reader.boolean(files, "files", "receive", &next.files.receive);
+	reader.boolean(files, "files", "send", &next.files.send);
 	reader.text(files, "files", "directory", &next.files.directory);
 
 	if (result.ok) {
@@ -377,6 +378,7 @@ std::string describe_config(const WraithConfig &config) {
 	}
 	out << "\n[files]\n"
 		<< "receive = " << flag(config.files.receive) << "\n"
+		<< "send = " << flag(config.files.send) << "\n"
 		<< "directory = \"" << config.files.directory << "\"\n";
 	return out.str();
 }

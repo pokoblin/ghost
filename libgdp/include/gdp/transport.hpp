@@ -111,8 +111,10 @@ public:
 	// Additional streams. The peer finished its direction (a FIN after the
 	// last on_data). Fires at most once.
 	std::function<void()> on_fin;
-	// Additional streams. The peer reset its direction (RESET_STREAM) with
-	// `error_code`: whatever it was sending will not be completed.
+	// Additional streams. The stream was reset with `error_code`: the peer
+	// reset its direction (RESET_STREAM), or asked ours to stop
+	// (STOP_SENDING; reported once the stream has closed). Whatever was
+	// still going will not be completed. Fires at most once.
 	std::function<void(uint64_t error_code)> on_reset;
 	// Additional streams. How many bytes of what this side sent the peer
 	// has acknowledged, a running total from the start of the stream.

@@ -303,7 +303,8 @@ struct ConnCallbacks {
 		return 0;
 	}
 
-	static int stream_close(ngtcp2_conn *conn, uint32_t, int64_t stream_id, uint64_t, void *ud, void *) {
+	static int stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id, uint64_t app_error_code, void *ud,
+		void *) {
 		Impl *c = impl(ud);
 		// gdp-spec.md §2.2: the host keeps the client's allowance of
 		// additional streams whole, one new one for each that closes. ngtcp2
@@ -317,8 +318,24 @@ struct ConnCallbacks {
 		}
 		if (it->second.released) {
 			c->net.streams.erase(it);
-		} else {
-			it->second.closed = true;
+			return 0;
+		}
+		it->second.closed = true;
+		// Closed by a reset the application hasn't heard of: the peer's
+		// STOP_SENDING cut our direction short (ngtcp2 1.16 has no callback
+		// for receiving one), or a RESET_STREAM that came after its FIN.
+		if ((flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) && !it->second.peer_reset) {
+			it->second.peer_reset = true;
+			c->core->events.post([weak = it->second.stream, app_error_code]() {
+				auto stream = weak.lock();
+				if (!stream || !stream->self) {
+					return;
+				}
+				auto on_reset = stream->self->on_reset;
+				if (on_reset) {
+					on_reset(app_error_code);
+				}
+			});
 		}
 		return 0;
 	}

@@ -67,7 +67,8 @@ encoder, NVENC's zero-copy input, the bit depth, PyroWave's ceiling, and
 which codecs are offered), `[refine]` (lossless refinement's settle time and
 bandwidth budget, with per-profile overrides in `[refine.lan]`,
 `[refine.internet]` and `[refine.mobile]`) and `[files]` (whether clients
-may send files, and where they go). It differs from ghostd.toml
+may send files and where they go, and whether they may fetch the files
+the user copies). It differs from ghostd.toml
 because of who reads it:
 
 - **Read per session.** Each wraith reads it once at startup, so a

@@ -1,16 +1,18 @@
 # File transfer
 
-Files from the client to the host, behind the `file` capability
-(gdp-spec.md §7.12): the client offers each file on an additional stream
-of its own (§2.2), the host accepts it into the user's download
-directory. Code: libgdp's additional streams (`transport.hpp`,
-`src/transport/quic_conn.cpp`) and `file_transfer.hpp`, which both ends
-share; `host/wraith/src/session/file_receiver.*` on the host.
+Files both ways behind the `file` capability (gdp-spec.md §7.12): the
+client offers each of its files on an additional stream of its own
+(§2.2), the host accepts it into the user's download directory; and the
+host lists the files its user copies, which the client fetches the same
+way, one stream per file. Code: libgdp's additional streams
+(`transport.hpp`, `src/transport/quic_conn.cpp`) and `file_transfer.hpp`,
+which both ends share; `host/wraith/src/session/file_receiver.*` and
+`file_sender.*` on the host, and the clipboard sink
+(`session/clipboard_sync.*`) for what was copied.
 
-Only client to host in this version. `FileOpen` case 2 is reserved for
-the other direction, which would also be opened by the client (a request
-for a file the host offered, say one copied on the desktop), so that the
-host never has to open streams and the client keeps granting none.
+The client opens every stream, both ways (a fetch is a request on a
+stream of the client's), so the host never opens streams and the client
+keeps granting none.
 
 ## Additional streams in libgdp
 
@@ -46,9 +48,11 @@ What it does now:
   get the wrong ID.
 
 ngtcp2 1.16 (Ubuntu 26.04's) has no callback for a received
-`STOP_SENDING`, so the transport doesn't report one; the file protocol
-doesn't need it, since the receiver always says why in a `FileReply`
-before it stops reading.
+`STOP_SENDING`. A stream that closes with an application error code the
+application hasn't heard about yet is reported through `on_reset` when it
+closes: that is how the host learns that a client cancelled a fetch whose
+request direction had already ended with its FIN (a `RESET_STREAM` after
+a FIN changes nothing on the receiving side).
 
 ## The host's receiver
 
@@ -85,10 +89,36 @@ destroyed with it.
   `FRAME_TOO_LARGE`, from an idle callback: the receiver finds out
   inside a stream callback, where the session can't be torn down.
 
+## Copied files, to the client
+
+- **What was copied.** Both clipboard backends read
+  `x-special/gnome-copied-files` (Nautilus, first line "copy" or "cut")
+  or `text/uri-list` ahead of any text when the selection offers it, and
+  the sink turns local `file://` URIs into paths (`copied_file_paths()`
+  in libgdp). With a session that can list them, the paths go out as a
+  `FileList` and not as text; without one (no `file`, or `[files] send =
+  false`) they go as their text, one a line, as before. Copying text
+  afterwards takes the list back with an empty one.
+- **The list.** `FileSender::set_list()` stats each path: folders are
+  listed but flagged, anything else that isn't a regular file (devices,
+  pipes) or has an unusable name is left out, at most 1000 entries. A new
+  list makes the old one unfetchable; a fetch already going keeps going.
+- **Sending.** A request is answered from the latest list by index:
+  the file is opened then, and `FileSending` carries its size at that
+  moment. A thread of its own reads 256 KiB at a time (`pread`), so a
+  cold disk doesn't stall the encoder. A file that comes up short while
+  being read is reset rather than sent short.
+- **Pacing.** File data competes with the video for the downlink.
+  Nothing more is read while the video's send queue has a backlog
+  (`GdpSession::send_queue_clear()`, retried every 10 ms), and the bytes in
+  flight follow `FileWindow`: LEDBAT-like, growing while the RTT stays
+  within 25 ms of the lowest seen and halving (once a round trip) above
+  it, between 256 KiB and 16 MiB. The client's uploads use the same rule.
+
 ## Limitations
 
-- No transfers to the client yet, no folders, no resumption: a
-  connection lost mid-transfer loses the partial file.
+- No folders either way, no resumption: a connection lost mid-transfer
+  loses the partial file.
 - File data and the client's StatsReports share the client's uplink. A
   client that sends faster than its uplink carries delays its reports
   and makes the host's rate control think the path got worse; pacing is

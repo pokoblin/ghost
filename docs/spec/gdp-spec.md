@@ -1046,6 +1046,7 @@ connection MUST be ignored.
 | `LogoutRequest` | client → host | | §7.10 |
 | `DiagnosticsRequest` | host → client | | §7.11 |
 | `DiagnosticsReport` | client → host | after a request | §7.11 |
+| `FileList` | host → client | `file` in effect | §7.12 |
 
 `NetworkProfileChanged` has one field, `profile` (1, `NetworkProfile`).
 
@@ -1395,14 +1396,16 @@ for the answer indefinitely.
 ### 7.12 File transfer
 
 With the `file` capability in effect, the client sends files to the host,
-one additional stream (§2.2) of kind `file` per file. The client opens
-every `file` stream; the host never does. A host offers the capability
-only if it has somewhere to put received files (§17, "File transfer"), and
-on accepting it grants the client 4 `file` streams at once (§2.2); a
-client with more files to send queues them.
+and fetches the files the host's user copied, one additional stream
+(§2.2) of kind `file` per file. The client opens every `file` stream; the
+host never does. A host offers the capability only if it has somewhere to
+put received files (§17, "File transfer"), and on accepting it grants the
+client 4 `file` streams at once (§2.2); a client with more files to send
+or fetch queues them.
 
 The stream's `StreamOpen.params` is a `FileOpen`, whose `oneof` holds a
-`FileOffer` (case 1; case 2 is reserved for transfers towards the client):
+`FileOffer` (case 1, a file for the host, below) or a `FileRequest`
+(case 2, a file from the host, "Copied files" below):
 
 | # | Field | Type | Meaning |
 |---|---|---|---|
@@ -1410,11 +1413,11 @@ The stream's `StreamOpen.params` is a `FileOpen`, whose `oneof` holds a
 | 2 | `size` | uint64 | Its length in bytes. |
 | 3 | `modified_unix_ms` | int64 | Its modification time, ms since the Unix epoch; 0 if unknown. |
 
-Everything the host sends on the stream is a `FileReply` frame (§3.1),
-a `oneof` of `accepted` (1, `FileAccepted`, no fields), `refused` (2,
-`FileError`), `saved` (3, `FileSaved`) and `failed` (4, `FileError`).
-`FileError` has one field, `code` (1, `FileErrorCode`); `FileSaved` has
-one, `name` (1, string).
+Everything the host sends on an offer's stream is a `FileReply` frame
+(§3.1), a `oneof` of `accepted` (1, `FileAccepted`, no fields), `refused`
+(2, `FileError`), `saved` (3, `FileSaved`) and `failed` (4, `FileError`);
+case 5, `sending`, answers a request. `FileError` has one field, `code`
+(1, `FileErrorCode`); `FileSaved` has one, `name` (1, string).
 
 | Code | Name | Meaning |
 |---|---|---|
@@ -1425,6 +1428,8 @@ one, `name` (1, string).
 | 4 | `FILE_ERROR_REFUSED` | The host's policy or its user said no. |
 | 5 | `FILE_ERROR_WRITE_FAILED` | Any other failure to store the file. |
 | 6 | `FILE_ERROR_SIZE_MISMATCH` | The stream ended before `size` bytes, or carried more. |
+| 7 | `FILE_ERROR_GONE` | The request names a list or file that is no longer there. |
+| 8 | `FILE_ERROR_READ_FAILED` | The host couldn't read the file. |
 
 The exchange:
 
@@ -1467,12 +1472,59 @@ A file's integrity rests on QUIC's: there is no checksum. Folders are not
 transferred in this version; a client offers the files in one, if it
 offers anything.
 
+**Copied files.** When the host's clipboard comes to hold files its user
+copied (a file manager's copy), the host sends `FileList` (host → client,
+on the control stream):
+
+| # | Field | Type | Meaning |
+|---|---|---|---|
+| 1 | `list_id` | uint64 | New for every list; never 0. |
+| 2 | `files` | repeated `FileListEntry` | In the order they were copied; at most 1000. |
+
+A `FileListEntry` is `name` (1, string, the rules above), `size` (2,
+uint64, when the list was made), `modified_unix_ms` (3, int64, 0 if
+unknown) and `directory` (4, bool: a folder, which can't be fetched in
+this version). When the clipboard stops holding files, the host sends a
+`FileList` with a new `list_id` and no files; right after `SessionAccept`
+it sends the current one if its clipboard holds files. While the
+clipboard holds files the host does not also send their paths as
+`ClipboardData` (§7.9): a client that pastes them as text would make
+something that isn't the file. Only the latest list can be fetched from.
+
+To fetch file `index` of list `list_id`, the client opens a `file`
+stream whose `FileOpen` is a `FileRequest` (`list_id` 1, uint64;
+`index` 2, uint32), and finishes its direction with FIN: it sends
+nothing else. The host answers with one `FileReply`:
+
+- `refused` with `FILE_ERROR_GONE` if the list isn't the latest, the
+  index is past its end or names a folder, or the file can't be found,
+  with `FILE_ERROR_READ_FAILED` if it can't be opened, then FIN;
+- or `sending` (5, `FileSending`: `name` 1, string; `size` 2, uint64;
+  `modified_unix_ms` 3, int64), then exactly `size` raw bytes, then FIN.
+  The size is the file's when the host opened it, not the list's.
+
+A host that can't go on part way (a read error) resets the stream with
+code 0. The client checks `name` against the rules above before using it
+for anything, never takes it as a path, and treats a stream that ends
+before `size` bytes as a failure. Either side cancels by resetting the
+stream (code 0), as for an offer. The host MUST send only the files of
+its latest list, by index: a request never names a path. A client
+that has had no `FileReply` 30 s after its request resets the stream.
+
+File data from the host shares the downlink with the video. A host
+SHOULD keep file data from building up a queue in front of it: it sends
+file bytes only while the video's own send queue is short, and keeps the
+file bytes in flight to what the path takes without queueing.
+
 *Host behavior:* the reference host stores files in the user's download
 directory (`XDG_DOWNLOAD_DIR`, else `~/Downloads`), writing to a hidden
 temporary file there and renaming it once complete, and never overwrites
 a file: when a name is taken it tries `name (1).ext`, `name (2).ext` and
 so on. It checks for `size` bytes of free space before accepting, and
 shows one desktop notification when a batch of transfers has finished.
+It reads copied files from the clipboard's `x-special/gnome-copied-files`
+or `text/uri-list` (local `file://` URIs only), and sends them from a
+thread of its own.
 
 ---
 
@@ -2445,7 +2497,10 @@ do by typing. A host MUST NOT let a received name choose where a file
 goes (no paths, no `..`, no following a symbolic link at the target),
 MUST NOT overwrite or execute anything, and SHOULD keep received files
 in one directory the user knows to look in. A client sends only files
-its user chose to send, never on its own.
+its user chose to send, never on its own. The other way, the client can
+fetch only what the host's user copied, by its index in the latest
+`FileList`, never a path; and names from the host are held to the same
+rules before the client stores anything under them.
 
 **Raw controllers.** A HID device's identity and descriptor decide which
 of the host's drivers binds to it and what that driver makes of it, so
@@ -2491,7 +2546,8 @@ either side to the other; a client SHOULD let its user turn it off.
 | Clipboard data, maximum | 1 047 552 bytes (1 MiB − 1 KiB) | §7.9 |
 | File streams at once | 4 | §7.12 |
 | File name, maximum; opening frame, maximum | 255 bytes; 4096 bytes | §7.12 |
-| File offer, reply deadline | 30 s | §7.12 |
+| File offer or request, reply deadline | 30 s | §7.12 |
+| `FileList` entries, maximum | 1000 | §7.12 |
 | `DiagnosticsReport` text, maximum | 512 KiB | §7.11 |
 | Gamepad slots; axes; buttons | 4; 6; 26 | §8.5 |
 | HID report descriptor; report | 4096 bytes; 4096 bytes | §8.6 |

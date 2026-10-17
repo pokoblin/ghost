@@ -136,6 +136,9 @@ struct WraithConfig {
 	struct Files {
 		// Offer the "file" capability at all.
 		bool receive = true;
+		// Let the client fetch the files the user copies (a FileList);
+		// false sends their paths as clipboard text instead, as before.
+		bool send = true;
 		// Where received files go; empty is the user's download directory
 		// (file_receive_directory()). A leading "~/" is the home directory.
 		std::string directory;
