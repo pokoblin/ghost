@@ -240,6 +240,7 @@ message FileAccepted {}
 
 message FileSaved {
   string name = 1;              // the name it was saved under: "name (1).ext" when the offered one was taken
+  string directory = 2;         // the folder it was saved in, an absolute path on the host; "" if not said
 }
 
 message FileError {
