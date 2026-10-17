@@ -26,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -342,7 +343,8 @@ int main() {
 	receiver.reset();
 	client.reset();
 	server_conn.reset();
-	system(("rm -rf " + dir).c_str());
+	std::error_code ignored;
+	std::filesystem::remove_all(dir, ignored);
 	unlink(cert.c_str());
 	unlink(key.c_str());
 	if (g_failures) {
