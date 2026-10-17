@@ -151,9 +151,9 @@ struct GnomeClipboard::Impl {
 		if (session_is_owner) {
 			return 0; // the echo of our own SetSelection
 		}
-		std::string mime = gdp::select_clipboard_mime(mimes);
+		std::string mime = select_mime(mimes);
 		if (mime.empty()) {
-			return 0; // an image or a file list: nothing v1 carries
+			return 0; // an image: nothing the wire carries
 		}
 		impl->read_selection(mime);
 		return 0;
@@ -317,7 +317,7 @@ void GnomeClipboard::close() {
 
 void GnomeClipboard::read_pipe(int fd, const std::string &mime) {
 	pipes_.read(fd,
-		[this, mime](std::string raw) { note_local_text(gdp::decode_clipboard_text(mime, raw)); });
+		[this, mime](std::string raw) { note_local_payload(mime, raw); });
 }
 
 void GnomeClipboard::write_pipe(int fd, std::string payload, uint32_t serial) {

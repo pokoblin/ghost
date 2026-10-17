@@ -63,6 +63,11 @@ public:
 	// An additional stream the viewer opened (gdp::Connection::on_stream).
 	void add_stream(std::unique_ptr<gdp::Stream> stream);
 
+	// A stream whose FileOpen is a request for a copied file (§7.12) goes
+	// here, its callbacks still this receiver's until it sets its own.
+	// Unset, requests are refused as unsupported.
+	std::function<void(std::unique_ptr<gdp::Stream>, const gdp::session::FileRequest &)> on_request;
+
 	// Files stored, transfers still running: for logs and tests.
 	size_t files_saved() const { return files_saved_; }
 	size_t active_transfers() const { return transfers_.size(); }

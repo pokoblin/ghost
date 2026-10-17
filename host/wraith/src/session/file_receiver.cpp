@@ -304,6 +304,14 @@ void FileReceiver::handle_offer(Transfer *t) {
 		protocol_error(t, static_cast<uint64_t>(gdp::ErrorCode::kMalformedFrame));
 		return;
 	}
+	if (open.has_request() && on_request) {
+		// Not ours: the stream goes, the transfer that read it doesn't.
+		std::unique_ptr<gdp::Stream> stream = std::move(t->stream);
+		transfers_.erase(t->id);
+		auto handler = on_request;
+		handler(std::move(stream), open.request());
+		return;
+	}
 	if (!open.has_offer()) {
 		refuse(t, gdp::session::FILE_ERROR_UNSUPPORTED);
 		return;

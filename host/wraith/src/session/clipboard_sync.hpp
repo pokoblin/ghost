@@ -111,15 +111,36 @@ public:
 	// rather than copying it at construction.
 	std::function<void(const std::string &utf8)> on_local_change;
 
+	// The files a local copy put on the clipboard (a file manager's copy),
+	// as local paths, for the session to list (gdp-spec.md §7.12). Empty
+	// while the clipboard holds anything else.
+	const std::vector<std::string> &current_files() const { return files_; }
+
+	// The local clipboard came to hold copied files (`paths`), or stopped
+	// holding them (empty). Set by GdpSession while it can list them; unset,
+	// a copy of files goes to on_local_change as their paths, one a line,
+	// the text a file manager offers alongside.
+	std::function<void(const std::vector<std::string> &paths)> on_local_files;
+
+	// Which of `offered` an implementation reads for a local change:
+	// copied files first, then the best text.
+	static std::string select_mime(const std::vector<std::string> &offered);
+
 protected:
 	// What an implementation calls once it has text for a local change:
 	// caches it for current_text() and fires on_local_change.
 	void note_local_text(std::string utf8);
+	// What an implementation calls with whatever it read as `mime`
+	// (select_mime()'s choice): copied files, or text.
+	void note_local_payload(const std::string &mime, const std::string &raw);
 
 	ClipboardPipes pipes_;
 
 private:
+	void note_local_files(std::vector<std::string> paths);
+
 	std::string cached_;
+	std::vector<std::string> files_;
 };
 
 } // namespace wraith

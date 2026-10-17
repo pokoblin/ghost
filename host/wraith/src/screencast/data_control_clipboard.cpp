@@ -6,6 +6,7 @@
 #include "screencast/wayland_client.hpp"
 
 #include "gdp/clipboard.hpp"
+#include "gdp/file_transfer.hpp"
 
 #include <ext-data-control-v1-client-protocol.h>
 #include <wayland-client-protocol.h>
@@ -120,9 +121,9 @@ struct DataControlClipboard::Impl {
 			return;
 		}
 		auto it = offers.find(offer);
-		std::string mime = it == offers.end() ? std::string() : gdp::select_clipboard_mime(it->second);
+		std::string mime = it == offers.end() ? std::string() : select_mime(it->second);
 		if (mime.empty()) {
-			drop_offer(offer); // an image or a file list: nothing v1 carries
+			drop_offer(offer); // an image: nothing the wire carries
 			return;
 		}
 
@@ -225,13 +226,14 @@ void DataControlClipboard::close() {
 
 void DataControlClipboard::read_pipe(int fd, const std::string &mime) {
 	pipes_.read(fd, [this, mime](std::string raw) {
-		std::string text = gdp::decode_clipboard_text(mime, raw);
-		if (text == impl_->own_text) {
-			// The compositor hands our own source's offer back to us like
-			// any other client's; that is our set_text(), not a copy.
+		// The compositor hands our own source's offer back to us like any
+		// other client's; that is our set_text(), not a copy. (Ours offers
+		// only text, so a file list is never one.)
+		bool files = !gdp::select_copied_files_mime({mime}).empty();
+		if (!files && gdp::decode_clipboard_text(mime, raw) == impl_->own_text) {
 			return;
 		}
-		note_local_text(std::move(text));
+		note_local_payload(mime, raw);
 	});
 }
 

@@ -158,7 +158,9 @@ void GdpSession::dispatch() {
 void GdpSession::reset_session(uint64_t error_code) {
 	// Partial files go with the client that was sending them.
 	files_close_.cancel();
+	file_sender_.reset();
 	files_.reset();
+	last_list_empty_ = true;
 	if (active_) {
 		active_->conn->close(error_code);
 		active_.reset();
@@ -837,6 +839,42 @@ void GdpSession::start_file_receiver() {
 	};
 	active_->conn->allow_streams(gdp::kFileStreamsAtOnce);
 	WLOG_INFO("gdp: files from the client go to %s", file_directory_.c_str());
+	if (config().files.send) {
+		file_sender_ = std::make_unique<FileSender>(
+			host_.event_loop(), [this] { return active_ ? active_->conn->rtt_us() : 0u; },
+			[this] { return send_queue_clear(); });
+		files_->on_request = [this](std::unique_ptr<gdp::Stream> stream, const gdp::session::FileRequest &request) {
+			if (file_sender_) {
+				file_sender_->serve(std::move(stream), request);
+			}
+		};
+		hook_copied_files();
+	}
+}
+
+void GdpSession::hook_copied_files() {
+	ClipboardSink *clipboard = host_.session().clipboard();
+	if (!clipboard || !file_sender_) {
+		return;
+	}
+	clipboard->on_local_files = [this](const std::vector<std::string> &paths) { copied_files_changed(paths); };
+	// Copied before this client attached: listed now (gdp-spec.md §7.12).
+	if (!clipboard->current_files().empty()) {
+		copied_files_changed(clipboard->current_files());
+	}
+}
+
+void GdpSession::copied_files_changed(const std::vector<std::string> &paths) {
+	if (!authenticated_ || !file_sender_) {
+		return;
+	}
+	if (paths.empty() && last_list_empty_) {
+		return; // nothing listed, nothing to take back
+	}
+	gdp::session::ControlEnvelope env;
+	*env.mutable_file_list() = file_sender_->set_list(paths);
+	last_list_empty_ = env.file_list().files_size() == 0;
+	send_control(env);
 }
 
 void GdpSession::clipboard_sink_changed() {
@@ -844,6 +882,7 @@ void GdpSession::clipboard_sink_changed() {
 		return;
 	}
 	start_clipboard_sync();
+	hook_copied_files();
 }
 
 void GdpSession::start_clipboard_sync() {
@@ -875,6 +914,7 @@ void GdpSession::start_clipboard_sync() {
 void GdpSession::stop_clipboard_sync() {
 	if (ClipboardSink *clipboard = host_.session().clipboard()) {
 		clipboard->on_local_change = nullptr;
+		clipboard->on_local_files = nullptr;
 	}
 }
 

@@ -139,6 +139,11 @@
 # offering it to clients.
 #receive = true
 
+# Files the user copies in the session (a file manager's Copy) can be
+# fetched by the client, which pastes them as files. false sends their
+# paths as clipboard text instead.
+#send = true
+
 # Where received files go. Empty is the user's download directory
 # (XDG_DOWNLOAD_DIR, else ~/Downloads); "~/" at the start is their home.
 #directory = ""

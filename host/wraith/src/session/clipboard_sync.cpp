@@ -4,6 +4,7 @@
 #include "session/clipboard_sync.hpp"
 
 #include "gdp/clipboard.hpp"
+#include "gdp/file_transfer.hpp"
 
 #include "util/log.hpp"
 
@@ -221,7 +222,46 @@ void ClipboardPipes::write(int fd, std::string text, std::function<void(bool ok)
 ClipboardSink::ClipboardSink(struct wl_event_loop *loop) : pipes_(loop) {}
 ClipboardSink::~ClipboardSink() = default;
 
+std::string ClipboardSink::select_mime(const std::vector<std::string> &offered) {
+	std::string files = gdp::select_copied_files_mime(offered);
+	return files.empty() ? gdp::select_clipboard_mime(offered) : files;
+}
+
+void ClipboardSink::note_local_payload(const std::string &mime, const std::string &raw) {
+	if (gdp::select_copied_files_mime({mime}) == mime) {
+		note_local_files(gdp::copied_file_paths(mime, raw));
+	} else {
+		note_local_text(gdp::decode_clipboard_text(mime, raw));
+	}
+}
+
+void ClipboardSink::note_local_files(std::vector<std::string> paths) {
+	if (paths.empty()) {
+		return; // nothing local in it (remote URIs only): as good as not a copy
+	}
+	files_ = std::move(paths);
+	std::string text;
+	for (const std::string &path : files_) {
+		text += (text.empty() ? "" : "\n") + path;
+	}
+	if (!text.empty() && text.size() <= gdp::kMaxClipboardBytes) {
+		cached_ = text; // what a session that can't list files gets
+	}
+	if (on_local_files) {
+		on_local_files(files_);
+	} else if (on_local_change && cached_ == text) {
+		on_local_change(cached_);
+	}
+}
+
 void ClipboardSink::note_local_text(std::string utf8) {
+	// Anything else on the clipboard means the copied files are gone.
+	if (!files_.empty()) {
+		files_.clear();
+		if (on_local_files) {
+			on_local_files(files_);
+		}
+	}
 	if (utf8.empty() || utf8.size() > gdp::kMaxClipboardBytes) {
 		// An empty read is "nothing textual here", never a request to
 		// clear the peer's clipboard (gdp-spec.md §7.9).
