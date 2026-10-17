@@ -344,8 +344,8 @@ int main() {
 
 		// 8. A host that gives up mid-way: its last word and FIN, then it
 		// lets the stream go while the client is still sending. The reply
-		// still arrives (the release stops only the reading), and the
-		// client is not reset -- it just isn't read any more.
+		// still arrives (the release stops only the reading), and then the
+		// client hears that its own direction was stopped.
 		Sent refused;
 		refused.stream = client_conn->open_stream();
 		watch(refused);
@@ -359,8 +359,27 @@ int main() {
 		received.back()->stream.reset();
 		assert(pump_until(client_transport, server_transport, 5000, [&] { return refused.fin; }));
 		assert(refused.reply == last_word);
-		assert(!refused.reset);
+		assert(pump_until(client_transport, server_transport, 5000, [&] { return refused.reset; }));
+		assert(refused.reset_code == 0);
 		refused.stream.reset();
+
+		// 9. A stream whose own direction ended with its first bytes (a
+		// request): reset by the client afterwards, the host still hears
+		// it, once the stream has closed.
+		Sent request;
+		request.stream = client_conn->open_stream();
+		watch(request);
+		request.stream->send(reinterpret_cast<const uint8_t *>("req"), 3, true);
+		want = received.size() + 1;
+		assert(pump_until(client_transport, server_transport, 5000,
+			[&] { return received.size() == want && received.back()->fin; }));
+		std::vector<uint8_t> reply_bytes = pattern(2 << 20, 4);
+		received.back()->stream->send(reply_bytes.data(), reply_bytes.size());
+		assert(pump_until(client_transport, server_transport, 5000, [&] { return !request.reply.empty(); }));
+		request.stream->reset(0);
+		assert(pump_until(client_transport, server_transport, 5000, [&] { return received.back()->reset; }));
+		received.back()->stream.reset();
+		request.stream.reset();
 
 		// The allowance came back from both: two more streams still open.
 		for (int i = 0; i < 2; i++) {
