@@ -185,6 +185,7 @@ add_executable(wraith
   src/screencast/dmabuf_reader.cpp
   src/screencast/dmabuf_tile_source.cpp
   src/screencast/ei_input.cpp
+  src/screencast/scroll_steps.cpp
   src/screencast/frame_hold.cpp
   src/screencast/gnome_remote_session.cpp
   src/screencast/display_scale.cpp
@@ -390,6 +391,11 @@ add_executable(wraith_display_scale_test tests/display_scale_test.cpp src/screen
 target_include_directories(wraith_display_scale_test PRIVATE src)
 target_compile_options(wraith_display_scale_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME wraith_display_scale_test COMMAND wraith_display_scale_test)
+
+add_executable(wraith_scroll_steps_test tests/scroll_steps_test.cpp src/screencast/scroll_steps.cpp)
+target_include_directories(wraith_scroll_steps_test PRIVATE src)
+target_compile_options(wraith_scroll_steps_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME wraith_scroll_steps_test COMMAND wraith_scroll_steps_test)
 
 # Lossless refinement's "which tiles go out losslessly this frame" policy
 # (docs/design/refinement.md). Links gdp for gdp/refine.hpp's layer types, but
