@@ -5,6 +5,7 @@
 
 #include "screencast/ei_input.hpp"
 #include "screencast/gnome_clipboard.hpp"
+#include "screencast/gnome_display_scale.hpp"
 #include "screencast/pipewire_capture.hpp"
 #include "screencast/sdbus_util.hpp"
 #include "util/clock.hpp"
@@ -55,6 +56,9 @@ struct GnomeRemoteSession::Impl {
 	sd_bus_slot *node_added_slot = nullptr;
 	sd_bus_slot *closed_slot = nullptr;
 	struct wl_event_source *bus_source = nullptr;
+	// Null if DisplayConfig can't be subscribed to: the session runs on
+	// at mutter's scale.
+	std::unique_ptr<GnomeDisplayScale> display_scale;
 
 	std::function<void()> on_closed_cb;
 
@@ -260,6 +264,9 @@ bool GnomeRemoteSession::open(const Config &config) {
 		kScStreamIface, "PipeWireStreamAdded", Impl::on_pipewire_stream_added, impl_.get());
 	sd_bus_match_signal(impl_->bus, &impl_->closed_slot, kRdService, impl_->rd_path.c_str(), kRdSessionIface,
 		"Closed", Impl::on_session_closed, impl_.get());
+	// Also before Start(): it tells the virtual monitor this session makes
+	// from the ones already there.
+	impl_->display_scale = GnomeDisplayScale::create(impl_->bus);
 
 	if (!impl_->start_session()) {
 		return false;
@@ -296,6 +303,7 @@ void GnomeRemoteSession::close() {
 		sd_bus_slot_unref(impl_->closed_slot);
 		impl_->closed_slot = nullptr;
 	}
+	impl_->display_scale.reset();
 	if (impl_->bus) {
 		sd_bus_unref(impl_->bus);
 		impl_->bus = nullptr;

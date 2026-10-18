@@ -125,9 +125,9 @@ another run. Keep the path short: a Wayland socket path must fit in
 
 `ctest` in the build directory runs the unit tests in `tests/`: the
 rate controller, path-rate estimator, tile tracker, refinement encoder,
-frame hold, token, session certificate, profiles, config, HID and
-gamepad translation, the dmabuf fd hand-off, the XRGB conversion, the
-GPU tile hash and PyroWave's input path.
+frame hold, GNOME display scale, token, session certificate, profiles,
+config, HID and gamepad translation, the dmabuf fd hand-off, the XRGB
+conversion, the GPU tile hash and PyroWave's input path.
 
 Rate control is exercised against shaped links by
 `client/spectre/tools/netem-harness`, which runs a real wraith against

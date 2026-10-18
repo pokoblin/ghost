@@ -187,6 +187,8 @@ add_executable(wraith
   src/screencast/ei_input.cpp
   src/screencast/frame_hold.cpp
   src/screencast/gnome_remote_session.cpp
+  src/screencast/display_scale.cpp
+  src/screencast/gnome_display_scale.cpp
   src/screencast/wayland_client.cpp
   src/screencast/kwin_remote_session.cpp
   src/screencast/kwin_output_size.cpp
@@ -380,6 +382,14 @@ add_executable(wraith_frame_hold_test tests/frame_hold_test.cpp src/screencast/f
 target_include_directories(wraith_frame_hold_test PRIVATE src)
 target_compile_options(wraith_frame_hold_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
 add_test(NAME wraith_frame_hold_test COMMAND wraith_frame_hold_test)
+
+# The GNOME backend's remembered display scale (screencast/display_scale.hpp):
+# picking a supported scale, the state file, and which changes are the
+# user's. The D-Bus half isn't linked.
+add_executable(wraith_display_scale_test tests/display_scale_test.cpp src/screencast/display_scale.cpp)
+target_include_directories(wraith_display_scale_test PRIVATE src)
+target_compile_options(wraith_display_scale_test PRIVATE -Wall -Wextra -Wno-unused-parameter)
+add_test(NAME wraith_display_scale_test COMMAND wraith_display_scale_test)
 
 # Lossless refinement's "which tiles go out losslessly this frame" policy
 # (docs/design/refinement.md). Links gdp for gdp/refine.hpp's layer types, but
