@@ -362,12 +362,21 @@ LocalFiles::Found LocalFiles::look(const Look &l) {
 	f.name = l.name;
 	if (l.share) {
 		path = gdp::resolve_beneath(l.root, l.relative, l.include_hidden);
-		gdp::LocalEntry entry;
-		if (path.empty() || !gdp::stat_local(path, &entry, l.relative.empty()) || entry.directory != l.listing) {
-			f.refused = gdp::session::FILE_ERROR_GONE; // gone, or a folder's bytes, or a file's contents
-			return f;
+		if (l.relative.empty()) {
+			// The shared folder itself, which resolve_beneath() found to be a
+			// folder; not stat_local(), as a drive (C:\) or "/" has no name.
+			if (path.empty() || !l.listing) {
+				f.refused = gdp::session::FILE_ERROR_GONE;
+				return f;
+			}
+		} else {
+			gdp::LocalEntry entry;
+			if (path.empty() || !gdp::stat_local(path, &entry) || entry.directory != l.listing) {
+				f.refused = gdp::session::FILE_ERROR_GONE; // gone, or a folder's bytes, or a file's contents
+				return f;
+			}
+			f.name = entry.name;
 		}
-		f.name = entry.name;
 	} else if (!l.top_level) {
 		// Inside a copied folder, a file or folder that has become a link
 		// since it was listed is not followed.
