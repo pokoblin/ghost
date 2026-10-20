@@ -3,6 +3,8 @@
 
 #include "screencast/ei_input.hpp"
 
+#include "screencast/scroll_steps.hpp"
+
 #include <libei.h>
 
 #include "util/log.hpp"
@@ -29,6 +31,7 @@ struct EiInput::Impl {
 	struct ei_device *pointer_abs_device = nullptr;
 	struct ei_device *keyboard_device = nullptr;
 	uint32_t emulating_seq = 0;
+	ScrollSteps scroll_x, scroll_y;
 
 	// Button/scroll capability isn't guaranteed to land on either
 	// specific device -- check whichever of the two actually has it
@@ -235,18 +238,23 @@ void EiInput::inject_axis(uint32_t, enum wl_pointer_axis orientation, double del
 	if (!device) {
 		return;
 	}
-	// `delta` is in wheel notches (gdp-spec.md §8.2); libei's
-	// discrete scroll counts 120 to a notch and takes fractions, so a
-	// touchpad's small steps stay small. Never rounded to nothing: a step
-	// too small to be 1/120 of a notch still moves.
-	int32_t discrete = static_cast<int32_t>(std::lround(delta * 120.0));
-	if (discrete == 0) {
-		discrete = delta > 0 ? 1 : -1;
+	// `delta` is in wheel notches (gdp-spec.md §8.2); libei's discrete
+	// scroll counts 120 to a notch and takes fractions, so a touchpad's
+	// small steps stay small.
+	const bool horizontal = orientation == WL_POINTER_AXIS_HORIZONTAL_SCROLL;
+	const int32_t steps = (horizontal ? impl_->scroll_x : impl_->scroll_y).add(delta);
+	if (steps == 0) {
+		return;
 	}
-	if (orientation == WL_POINTER_AXIS_HORIZONTAL_SCROLL) {
-		ei_device_scroll_discrete(device, discrete, 0);
+	if (!impl_->config.discrete_scroll_whole_notches_only || steps % 120 == 0) {
+		ei_device_scroll_discrete(device, horizontal ? steps : 0, horizontal ? 0 : steps);
 	} else {
-		ei_device_scroll_discrete(device, 0, discrete);
+		// mutter takes a scroll delta as pixels, 10 to a notch (its
+		// DISCRETE_SCROLL_STEP), and gives clients the 1/120 steps
+		// truncated (meta-wayland-pointer.c): a quarter step more keeps
+		// float rounding from losing one.
+		const double pixels = (steps + std::copysign(0.25, steps)) / 12.0;
+		ei_device_scroll_delta(device, horizontal ? pixels : 0.0, horizontal ? 0.0 : pixels);
 	}
 	ei_device_frame(device, ei_now(impl_->ei));
 }

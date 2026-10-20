@@ -110,6 +110,12 @@ and makes the calls in the order mutter requires:
   capture must be live first. The `NotifyPointer*`/`NotifyKeyboard*`
   methods are accepted but never reach a client's seat; libei is the
   only input path.
+- mutter keeps only the whole notches of a libei discrete scroll and
+  drops the rest, which is most of a touchpad's stream. `EiInput` sends
+  fractions of a notch as a scroll delta instead, 10 pixels to a notch
+  (mutter's own step, which it hands clients as 1/120 steps again), and
+  whole notches as discrete scroll. kwin keeps the fractions, so it gets
+  discrete scroll throughout.
 - There is no portal, consent dialog or allowlist: mutter's private API
   trusts any session-bus peer.
 - The launcher must not pass `--virtual-monitor`: `RecordVirtual` creates

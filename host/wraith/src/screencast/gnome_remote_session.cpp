@@ -599,6 +599,7 @@ std::unique_ptr<ScreencastInput> GnomeRemoteSession::make_input_sink() {
 	config.output_width = impl_->config.width;
 	config.output_height = impl_->config.height;
 	config.eis_fd = eis_fd;
+	config.discrete_scroll_whole_notches_only = true;
 	if (!input->open(config)) {
 		return nullptr;
 	}
